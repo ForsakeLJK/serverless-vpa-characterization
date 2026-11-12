@@ -1,6 +1,6 @@
 # Experiment specification: Kubernetes VPA (InPlace) under a serverless workload
 
-Status: agreed design, not yet implemented. Written 2026-11-12, revised the same day to `k = 4` and four-day windows. Target venue: ISPASS 2027.
+Status: agreed design, not yet implemented. Written 2026-11-12, revised the same day to `k = 4`, four-day windows and a SeBS workload function. Target venue: ISPASS 2027.
 
 Items marked **[verify]** are assumptions, single measurements or derivations that must be confirmed before the full runs. They are collected in section 13.
 
@@ -25,8 +25,6 @@ Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on 
 
 **Transfer question.** Does a configuration hand-tuned on window A still hold up on window B? The A-tuned configuration is run unchanged on window B and compared with static and default there.
 
-**Motivation to develop in the paper.** VPA's defaults (24h windows, 12h in-bounds threshold, 1-minute loops) were designed for long-running services with daily load cycles, at a time when resizing meant restarting the pod. InPlace removes the restart cost, and a serverless function is bursty on a scale of minutes. This reading of the design history is not yet backed by citations **[verify]**; candidate sources are the Autopilot paper (EuroSys 2020) and the VPA design proposal.
-
 ## 2. Testbed
 
 | | Prototype | Full runs |
@@ -46,45 +44,60 @@ Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on 
 
 ## 3. Workload function
 
-- **Source**: the primes function from AWARE (`aware-main/benchmarks/primes/web-server-primes.py`), a pure-Python sieve.
-- **Payload**: `n`, the sieve's upper bound. It is one fixed value for every request in every run.
-  - Full runs: `n` = 10,000,000, AWARE's original value. Its cost per invocation must be re-measured on the full-run machine **[verify]**.
-  - Prototype only: `n` = 1,000,000, to fit 4 vCPUs.
-- **Deviations from AWARE**, both documented in the paper:
-  - `n` is read from the request instead of being hardcoded.
-  - Requests are processed concurrently, one process per request. As shipped, the server handles one request at a time, which caps CPU at one core and makes memory independent of load.
-- **Concurrency cap**: 4× the peak concurrency observed in the profiling run for that window, fixed for all settings on that window. Requests beyond the cap queue in the server.
-- **Deployment**: one Deployment, one replica, no horizontal scaling.
+- **Source**: `501.graph-pagerank` from the SeBS benchmark suite (Copik et al., arXiv 2012.14132), Python implementation, at `benchmarks/500.scientific/501.graph-pagerank/python/function.py`. It generates a Barabási–Albert graph with igraph and computes PageRank on it.
+- **Why this function**: it is self-contained, and both its CPU time and memory grow with the input. Nothing else sits in the request path. Most other SeBS functions call object storage or a database, which adds latency that VPA can neither observe nor reduce.
+- **Pinned versions**: SeBS commit `089e5c6ccece0b4d9508e08eee80cf3527590c4f` (2026-10-24), Python 3.12, igraph 0.11.4 (the version SeBS pins for Python 3.12).
+- **Payload**: SeBS's `large` input, which is `size = 100000` vertices with `seed = 42`. It is identical for every request in every run, including the prototype. Each response can be checked against SeBS's expected value for that input.
+- **What is borrowed from SeBS**: the function code, unmodified, and its input definition. SeBS's deployment tooling is not used, because its only Kubernetes route is OpenWhisk, which creates and destroys its own function containers and conflicts with a single pod resized in place.
+- **Our packaging**: the function runs in our own container behind a thin HTTP wrapper, deployed as a plain Deployment with one replica and no horizontal scaling.
+- **Deviations from how SeBS functions normally run**, both documented in the paper:
+  - **Concurrency inside one pod**: on a FaaS platform each instance serves one request at a time. Here the wrapper runs one process per request, so the arrival rate drives both CPU and memory within the single pod.
+  - **Warm invocations only**: each request's process is forked from a parent that has already imported igraph. Cold starts are out of scope.
+- **Concurrency cap**: 4× the peak concurrency observed in the profiling run for that window, fixed for all settings on that window. Requests beyond the cap queue in the server. The cap stops a throttled pod from forking without bound; the factor 4 is a judgment call, not a derived value **[verify]**.
 - **Resources**: requests equal limits for CPU and memory (Guaranteed QoS), so every allocation change alters what the function can use.
 - **Resize policy**: `NotRequired` for CPU and memory. No resize may restart the container.
 
-Indicative cost per invocation, measured once on the Mac with Python 3.12 **[verify]**:
+Cost per invocation, measured once on the Mac outside a container **[verify]**. Results matched SeBS's expected values.
 
-| `n` | Service time | Memory above a 13 MB baseline |
-|---|---|---|
-| 1,000,000 | 76 ms | 21 MB |
-| 3,000,000 | 252 ms | 64 MB |
-| 10,000,000 | 1,012 ms | 211 MB |
-
-Both scale linearly with `n`, about 280 MB per busy core.
+| SeBS input size | Vertices | Service time | Memory above a 33 MB baseline |
+|---|---|---|---|
+| test | 10 | 0.2 ms | 0.3 MB |
+| small | 10,000 | 24 ms | 12 MB |
+| large (used) | 100,000 | about 330 ms | about 115 MB |
 
 ## 4. Arrival process
 
 - **Trace**: Azure Functions Invocation Trace 2021 (`azure-trace/AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt`), 14 days.
 - **Arrival time**: `end_timestamp − duration`, since the trace records only end times.
-- **Function**: the one whose `func` id starts with `155e47f8e7f7`. It is the busiest (535,667 invocations) and the only high-volume function with load on all 14 days.
+- **Function**: the one whose `func` id starts with `cc5bb2108cc7`. Only its arrival times are used.
+- **Why this function**: its recorded execution time matches our workload. Its median duration is 0.38 s (middle 50%: 0.37–0.41 s), against about 0.33 s measured for pagerank at the `large` size. It has 142,856 invocations and load on all 14 days. No other high-volume function with daily load matches a SeBS-defined input size.
 - **No rate scaling**: arrival times are used as recorded, apart from time compression.
 - **Time compression**: `k = 4`. One trace day replays in 6h.
 - **Windows**: four consecutive trace days each, replayed in 24h. Days are 0-indexed from the trace start, each 86,400 s.
 
-| Window | Trace days | Invocations | Daily volume (thousands) | Peak minute per day | Use |
-|---|---|---|---|---|---|
-| A | 3–6 | 137,353 | 43.1, 45.1, 32.5, 16.6 | 136, 150, 136, 121 | Tuning and main comparison |
-| B | 8–11 | 141,316 | 50.7, 42.0, 30.3, 18.3 | 210, 129, 127, 132 | Transfer evaluation |
+| | Window A | Window B |
+|---|---|---|
+| Trace days | 2–5 | 9–12 |
+| Use | Tuning and main comparison | Transfer evaluation |
+| Invocations | 52,092 | 57,511 |
+| Daily volume (thousands) | 26.5, 9.0, 10.7, 5.8 | 14.7, 13.9, 25.4, 3.5 |
+| Peak minute per day (invocations) | 122, 71, 85, 39 | 143, 91, 188, 51 |
+| Minutes with any load | 41% | 29% |
+| Replayed rate, mean / peak minute | 0.6 / 8.1 rps | 0.7 / 12.5 rps |
 
-- The two windows fall in different weeks and have similar volume and a similar declining shape.
-- Replayed rates at `k = 4` on window A: about 1.6 rps on average and 10 rps in the peak minute. Window B peaks at 14 rps.
-- Expected demand at `n` = 10M from the Mac figures: about 1.6 cores on average and 10–14 cores in the peak minute, with roughly 2–3 GB of memory at peak **[verify]**.
+Estimated CPU demand at `k = 4`, from per-minute counts and the 0.33 s Mac service time **[verify]**:
+
+| | Window A | Window B |
+|---|---|---|
+| Median minute | 0 cores | 0 cores |
+| 90th percentile minute | 0.7 cores | 0.9 cores |
+| 99th percentile minute | 1.5 cores | 2.4 cores |
+| Peak minute | 2.7 cores | 4.1 cores |
+| Requests arriving in minutes above the 90th percentile | 55% | 72% |
+
+- **The load is idle-heavy and bursty.** The pod is idle in most minutes and averages about 0.2 cores over a run. This is typical of the trace and is the serverless property under study.
+- **Memory demand is modest**: about 33 MB idle, and roughly 350 MB (window A) to 500 MB (window B) in the peak minute, which is close to VPA's default 250Mi floor.
+- **The windows fall in different weeks.** Window A has its busiest day first; window B has it third.
 
 **Why four days.** A single-day run gives VPA one memory data point and shows only first-day behaviour. Four days is the estimated minimum for default VPA to lower a memory recommendation after a first-day peak (section 14) **[verify]**. VPA's full memory aggregation window is 8 intervals, so an 8-day run (48h at `k = 4`) is needed to exercise it completely; that is future work (section 15).
 
@@ -92,12 +105,12 @@ Both scale linearly with `n`, about 280 MB per busy core.
 
 - Open loop: each request is sent at its scheduled time whether or not earlier ones have finished.
 - Written in Python, environment managed with uv.
-- Timeout: fixed at 10× the unconstrained service time of the chosen `n`.
+- Timeout: fixed at 10× the unconstrained service time of the payload (about 3.3 s by the Mac measurement).
 - Records for every request: scheduled send time, actual send time, completion time, status (ok, error, timeout).
 
 ## 6. Settings
 
-All three settings use the same window, the same `n`, and the same initial allocation.
+All three settings use the same window, the same payload, and the same initial allocation.
 
 ### 6.1 Static (no VPA)
 
@@ -218,7 +231,7 @@ Per-run reset and collection overhead is extra and not yet measured. The first d
 
 ## 11. Prototype gate
 
-One 30-minute run on the Mac minikube cluster. The prototype only verifies the pipeline, so it does not follow the `k = 4` principle: it replays the first 6h of day 3 at `k = 12`, with VPA windows shortened further so that resizes occur within the run. No full run starts until all five checks pass:
+One 30-minute run on the Mac minikube cluster. The prototype only verifies the pipeline, so it does not follow the `k = 4` principle: it replays a busy 2h slice of day 2 at `k = 4`, with VPA windows shortened far below the `k = 4` values so that resizes occur within the run. It uses the same function and payload as the full runs. No full run starts until all five checks pass:
 
 1. At least one CPU resize up and one CPU resize down.
 2. At least one memory resize.
@@ -240,11 +253,12 @@ One 30-minute run on the Mac minikube cluster. The prototype only verifies the p
 
 ## 13. Items to verify before full runs
 
-- **`n`**: re-measure service time and memory per invocation at 10,000,000 on the ARM server, in a container.
+- **Payload cost**: re-measure pagerank's service time and memory per invocation at the `large` size on the ARM server, in a container. The duration match with the trace function and all demand estimates in section 4 depend on it.
+- **Concurrency cap factor**: 4× is a judgment call. Consider one run at a different factor to show the results do not hinge on it.
 - **Metrics refresh at 15s**: prototype gate check 4.
 - **System reserve** for `maxAllowed`: value not yet chosen.
 - **Four-day minimum for memory release**: derived by hand from the decaying-histogram rule (section 14), not checked against the 1.7.1 code. It can be verified offline with synthetic daily peaks.
-- **Peak placement**: the derivation assumes the highest memory peak falls on the window's first day. Daily peak-minute rates are similar across window A's days, so the profiling run must confirm where the peak actually falls.
+- **Peak placement**: the derivation assumes the highest memory peak falls on the window's first day. That holds for window A by peak-minute rate but not for window B, whose busiest day is the third. The profiling runs must confirm where the memory peaks actually fall.
 - **Memory window enforcement**: the docs define the window as 8 intervals with one peak each, but no code was found that removes peaks older than that. Read the checkpoint and aggregate-state code before making claims about the window in the paper.
 - **Design-history citations** for the motivation in section 1.
 - **Per-run overhead**: not measured.
@@ -258,11 +272,17 @@ One 30-minute run on the Mac minikube cluster. The prototype only verifies the p
 - **Tuned is in-sample on window A** by design (H1). Window B measures transfer only against static and default, not against B's own best configuration.
 - **Tuning cannot explore faster loops**, because 15s is already the practical floor of the metrics path.
 - **One function, one pod, one payload, one trace function.** Results do not cover horizontal scaling, multi-tenancy or other workload shapes.
+- **No scale-to-zero.** The pod stays alive through idle periods, which are most of each run. Idle-time cost is not compared against a platform that scales idle functions to zero.
+- **Concurrency inside one pod, warm invocations only.** Both differ from how a FaaS platform runs SeBS functions (section 3).
+- **Compute-bound function only.** VPA observes CPU and memory, not time spent waiting on storage or the network, so these results do not carry over to I/O-heavy functions.
+- **Memory demand sits near VPA's default floor.** Default memory recommendations are expected to be pinned at or modestly above 250Mi, which limits how much memory behaviour the default setting can show.
+- **Only arrival times come from the trace.** The trace function's own work is unknown; it was chosen because its recorded duration matches the SeBS function.
 - **Client and server share one machine** in the full runs, separated by NUMA node.
 
 ## 15. Future work
 
 - Eight-day runs (48h each at `k = 4`), to exercise VPA's full 8-interval memory window.
+- Other SeBS functions. The storage-backed ones (`210.thumbnailer`, `311.compression`, `220.video-processing`) would test how VPA behaves when part of the latency is I/O that it cannot observe or reduce.
 - Hand-tuning on window B as well, to measure the transfer gap against B's own best.
 - A larger tuning budget.
 - Higher compression (`k = 12` or `k = 24`) with a validation run against `k = 4`, to quantify how much compression changes the conclusions.
