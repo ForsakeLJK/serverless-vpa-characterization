@@ -1,12 +1,14 @@
 # Experiment specification: Kubernetes VPA (InPlace) under a serverless workload
 
-Status: agreed design, not yet implemented. Written 2026-11-12. Target venue: ISPASS 2027.
+Status: agreed design, not yet implemented. Written 2026-11-12, revised the same day to `k = 4` and four-day windows. Target venue: ISPASS 2027.
 
-Items marked **[verify]** are assumptions or single measurements that must be confirmed before the full runs. They are collected in section 13.
+Items marked **[verify]** are assumptions, single measurements or derivations that must be confirmed before the full runs. They are collected in section 13.
 
 ## 1. Goal, hypothesis and research questions
 
 Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on a single serverless function driven by real arrival times. Findings come from the results.
+
+**Design principle: default VPA must behave as it does in production.** Trace time is compressed by a factor `k`, and every time-based VPA setting is divided by exactly the same `k`, including the control-loop intervals. `k = 4` is the largest factor at which stock components allow this (section 6.2). The only delay that is not scaled is the kubelet's own resize work (section 14).
 
 **Research questions.** Every metric and figure must serve one of these.
 
@@ -22,6 +24,8 @@ Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on 
 - The tuned configuration is labelled "best-found on window A". It is not claimed to be a general-purpose setting.
 
 **Transfer question.** Does a configuration hand-tuned on window A still hold up on window B? The A-tuned configuration is run unchanged on window B and compared with static and default there.
+
+**Motivation to develop in the paper.** VPA's defaults (24h windows, 12h in-bounds threshold, 1-minute loops) were designed for long-running services with daily load cycles, at a time when resizing meant restarting the pod. InPlace removes the restart cost, and a serverless function is bursty on a scale of minutes. This reading of the design history is not yet backed by citations **[verify]**; candidate sources are the Autopilot paper (EuroSys 2020) and the VPA design proposal.
 
 ## 2. Testbed
 
@@ -44,10 +48,10 @@ Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on 
 
 - **Source**: the primes function from AWARE (`aware-main/benchmarks/primes/web-server-primes.py`), a pure-Python sieve.
 - **Payload**: `n`, the sieve's upper bound. It is one fixed value for every request in every run.
-  - Full runs: `n` = 3,000,000, provisional **[verify]**.
+  - Full runs: `n` = 10,000,000, AWARE's original value. Its cost per invocation must be re-measured on the full-run machine **[verify]**.
   - Prototype only: `n` = 1,000,000, to fit 4 vCPUs.
 - **Deviations from AWARE**, both documented in the paper:
-  - `n` is read from the request instead of being hardcoded at 10,000,000.
+  - `n` is read from the request instead of being hardcoded.
   - Requests are processed concurrently, one process per request. As shipped, the server handles one request at a time, which caps CPU at one core and makes memory independent of load.
 - **Concurrency cap**: 4× the peak concurrency observed in the profiling run for that window, fixed for all settings on that window. Requests beyond the cap queue in the server.
 - **Deployment**: one Deployment, one replica, no horizontal scaling.
@@ -68,13 +72,21 @@ Both scale linearly with `n`, about 280 MB per busy core.
 
 - **Trace**: Azure Functions Invocation Trace 2021 (`azure-trace/AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt`), 14 days.
 - **Arrival time**: `end_timestamp − duration`, since the trace records only end times.
-- **Function**: the one whose `func` id starts with `155e47f8e7f7`. It is the busiest (535,667 invocations) and the only high-volume function with load on all 14 days. It is active in 40.9% of minutes, with per-minute counts of 110 (p95), 125 (p99) and 252 (max).
+- **Function**: the one whose `func` id starts with `155e47f8e7f7`. It is the busiest (535,667 invocations) and the only high-volume function with load on all 14 days.
 - **No rate scaling**: arrival times are used as recorded, apart from time compression.
-- **Time compression**: `k = 12`. A 24h window replays in 2h. Mean rate becomes about 5 rps, the p95 minute 22 rps, the peak minute 50 rps.
-- **Windows** (days are 0-indexed from the trace start, each 86,400 s):
-  - Window A: day 3 (43.1k invocations). Used for tuning and the main comparison.
-  - Window B: day 12 (42.6k invocations). Used for the transfer evaluation.
-  - Prototype: the first 6h of day 3, which is 30 minutes at `k = 12`.
+- **Time compression**: `k = 4`. One trace day replays in 6h.
+- **Windows**: four consecutive trace days each, replayed in 24h. Days are 0-indexed from the trace start, each 86,400 s.
+
+| Window | Trace days | Invocations | Daily volume (thousands) | Peak minute per day | Use |
+|---|---|---|---|---|---|
+| A | 3–6 | 137,353 | 43.1, 45.1, 32.5, 16.6 | 136, 150, 136, 121 | Tuning and main comparison |
+| B | 8–11 | 141,316 | 50.7, 42.0, 30.3, 18.3 | 210, 129, 127, 132 | Transfer evaluation |
+
+- The two windows fall in different weeks and have similar volume and a similar declining shape.
+- Replayed rates at `k = 4` on window A: about 1.6 rps on average and 10 rps in the peak minute. Window B peaks at 14 rps.
+- Expected demand at `n` = 10M from the Mac figures: about 1.6 cores on average and 10–14 cores in the peak minute, with roughly 2–3 GB of memory at peak **[verify]**.
+
+**Why four days.** A single-day run gives VPA one memory data point and shows only first-day behaviour. Four days is the estimated minimum for default VPA to lower a memory recommendation after a first-day peak (section 14) **[verify]**. VPA's full memory aggregation window is 8 intervals, so an 8-day run (48h at `k = 4`) is needed to exercise it completely; that is future work (section 15).
 
 ## 5. Load generator
 
@@ -89,34 +101,39 @@ All three settings use the same window, the same `n`, and the same initial alloc
 
 ### 6.1 Static (no VPA)
 
-- A profiling run replays the window for 2h with generous fixed limits and no VPA.
-- Static CPU = the highest CPU usage in any 10s sample, plus 15%.
+- A profiling run replays the window for 24h with generous fixed limits and no VPA.
+- Static CPU = the highest CPU usage in any 15s window, plus 15%.
 - Static memory = the highest memory usage observed, plus 15%.
 - Computed separately for windows A and B.
 - The profiling run also yields the peak concurrency used for the concurrency cap.
 
 ### 6.2 VPA default
 
-Upstream defaults, with time-based statistical windows divided by `k = 12`. Everything not listed is stock.
+Upstream defaults, with every time-based setting divided by `k = 4`. Everything not listed is stock.
 
 | Flag | Component | Upstream | Used |
 |---|---|---|---|
-| `cpu-histogram-decay-half-life` | recommender | 24h | 2h |
-| `memory-histogram-decay-half-life` | recommender | 24h | 2h |
-| `memory-aggregation-interval` (count stays 8) | recommender | 24h | 2h |
-| `confidence-interval-cpu`, `confidence-interval-memory` | recommender | 24h | 2h |
-| `in-recommendation-bounds-eviction-lifetime-threshold` | updater | 12h | 1h |
-| `evict-after-oom-threshold` | updater | 10 min | 50s |
-| `recommender-interval` | recommender | 1 min | 10s **[verify]** |
-| `updater-interval` | updater | 1 min | 10s **[verify]** |
-| metrics-server `--metric-resolution` | metrics-server | 60s | 10s **[verify]** |
+| `cpu-histogram-decay-half-life` | recommender | 24h | 6h |
+| `memory-histogram-decay-half-life` | recommender | 24h | 6h |
+| `memory-aggregation-interval` (count stays 8) | recommender | 24h | 6h |
+| `confidence-interval-cpu`, `confidence-interval-memory` | recommender | 24h | 6h |
+| `in-recommendation-bounds-eviction-lifetime-threshold` | updater | 12h | 3h |
+| `evict-after-oom-threshold` | updater | 10 min | 150s |
+| `recommender-interval` | recommender | 1 min | 15s |
+| `updater-interval` | updater | 1 min | 15s |
+| metrics-server `--metric-resolution` | metrics-server | 60s | 15s |
 | `target-cpu-percentile`, `target-memory-percentile` | recommender | 0.9 | 0.9 |
 | `recommendation-margin-fraction` | recommender | 0.15 | 0.15 |
 | `pod-recommendation-min-cpu-millicores` | recommender | 25 | 25 |
 | `pod-recommendation-min-memory-mb` | recommender | 250 | 250 |
 | `pod-update-threshold` | updater | 0.1 | 0.1 |
 
-The loop intervals and metrics resolution are set to the lowest value stock metrics-server accepts: 10s if the prototype confirms it, otherwise 15s. No component is patched or replaced.
+**Why `k = 4` and not higher.** VPA reads usage from metrics-server, which scrapes the kubelet. Two limits apply:
+
+- metrics-server rejects a `--metric-resolution` below 10s (checked in its source, master branch).
+- Its FAQ recommends not going below 15s, which it gives as the resolution of the kubelet's own metrics.
+
+A recommender that polls faster than the metrics refresh sees repeated samples, and each CPU sample is an average over the scrape window. The whole loop therefore cannot usefully run faster than 15s, which is 1 minute divided by 4. At larger `k`, VPA would react more slowly relative to the workload than it does in production (3× slower at `k = 12`, 6× at `k = 24`, with a 15s floor). No component is patched or replaced.
 
 ### 6.3 VPA tuned
 
@@ -131,7 +148,7 @@ The configuration chosen by the procedure in section 7.
 
 ## 7. Tuning procedure
 
-Hand-tuning by diagnose-and-adjust, on window A only.
+Hand-tuning by diagnose-and-adjust, on window A only, using full four-day runs.
 
 1. Start from the first default run on window A.
 2. Record what went wrong (for example, memory pinned at the floor, or CPU target lagging bursts).
@@ -140,10 +157,12 @@ Hand-tuning by diagnose-and-adjust, on window A only.
 
 Guardrails:
 
-- **Declared knobs**: CPU and memory half-life, memory aggregation interval, confidence intervals, target percentiles, safety margin, the 25m / 250Mi floor, in-bounds lifetime threshold, update threshold. Nothing else may change. Loop intervals are excluded, since default is already at the stock floor.
+- **Declared knobs**: CPU and memory half-life, memory aggregation interval, confidence intervals, target percentiles, safety margin, the 25m / 250Mi floor, in-bounds lifetime threshold, update threshold. Nothing else may change. Loop intervals are excluded, since 15s is already the practical floor.
 - **Tuning log**: each iteration records the observation, the knob changed and why, and the result. The log is a paper artifact (figure 9).
 - **Budget**: 3 iterations to start. It may be raised later if the log shows continued improvement.
 - **Selection rule**, fixed before any tuning run: the tuned configuration is the iteration with the lowest mean allocated CPU and memory that has zero OOM kills and p99 latency no worse than 1.1× the static p99. If no iteration meets the constraint, take the one with the lowest p99 and report that the constraint was unmet.
+
+An alternative ordering of the stages is recorded in Appendix A as an open question.
 
 ## 8. Metrics and collection
 
@@ -164,6 +183,8 @@ Guardrails:
 | OOM kills | Count | `memory.events` |
 | CPU throttling | Throttled periods and throttled time | `cpu.stat` |
 
+Every metric is reported for the whole run and split into two phases: the first scaled day (cold start, hours 0–6) and scaled days 2–4 (warmed, hours 6–24).
+
 ### 8.2 Collectors
 
 No Prometheus. Two purpose-built collectors:
@@ -174,11 +195,12 @@ No Prometheus. Two purpose-built collectors:
 ## 9. Run protocol and hand-over
 
 - **Clean state per run**: new pod; VPA object and its checkpoint deleted; recommender restarted. No history carries over.
-- **Cold start**: the full 2h is reported. No warm-up period is excluded.
+- **Cold start**: the full 24h is reported. No warm-up period is excluded.
 - **One command per run**, taking a setting, a window and a repetition number.
 - **Self-describing results directory** per run: the exact configuration and flags, component versions, client log, sampler output, watch recorder output, audit log extract.
 - **Setup script** for the full-run machine: kubeadm cluster, VPA with the scaled flags, metrics-server resolution, NUMA placement.
 - **Sequential runs only**. The updater's flags are cluster-wide, and concurrent runs would share the kubelet.
+- **Smoke test on the full-run machine**: one short run per setting before the campaign starts, to catch setup problems before committing days of machine time.
 
 ## 10. Run plan
 
@@ -186,22 +208,22 @@ Repetition rule: every setting that appears in a results figure gets 3 repetitio
 
 | Stage | Runs | Time |
 |---|---|---|
-| Profiling, windows A and B | 2 | 4h |
-| Tuning iterations on window A | 3 | 6h |
-| Main comparison on A (3 settings × 3 repetitions) | 9 | 18h |
-| Transfer on B (3 settings × 3 repetitions) | 9 | 18h |
-| **Total** | **23** | **46h** |
+| Profiling, windows A and B | 2 | 48h |
+| Tuning iterations on window A | 3 | 72h |
+| Main comparison on A (3 settings × 3 repetitions) | 9 | 216h |
+| Transfer on B (3 settings × 3 repetitions) | 9 | 216h |
+| **Total** | **23** | **552h, about 23 days** |
 
-Allow about 48h with per-run reset and collection overhead (estimated, not measured). The first default run on A doubles as the starting observation for tuning.
+Per-run reset and collection overhead is extra and not yet measured. The first default run on A doubles as the starting observation for tuning.
 
 ## 11. Prototype gate
 
-One 30-minute run on the Mac minikube cluster, with VPA windows shortened further so that resizes occur within the run. No full run starts until all five checks pass:
+One 30-minute run on the Mac minikube cluster. The prototype only verifies the pipeline, so it does not follow the `k = 4` principle: it replays the first 6h of day 3 at `k = 12`, with VPA windows shortened further so that resizes occur within the run. No full run starts until all five checks pass:
 
 1. At least one CPU resize up and one CPU resize down.
 2. At least one memory resize.
 3. All three lag timestamps captured for every resize.
-4. The lowest stock metrics interval confirmed (10s or 15s), by checking that samples change at that period.
+4. At a 15s metrics resolution, samples from the metrics API are confirmed to refresh every 15s (by polling the pod's `timestamp` and `window` fields under load).
 5. Figures 1–6 render from the collected data.
 
 ## 12. Figures
@@ -212,30 +234,55 @@ One 30-minute run on the Mac minikube cluster, with VPA windows shortened furthe
 4. Latency over time (p50 and p99 per 1-minute bucket) with resize events marked.
 5. Latency CDF, all three settings overlaid.
 6. Lag breakdown per resize: recommendation updated to pod patched, pod patched to kubelet applied.
-7. Summary bars with median and range over repetitions: p99, throughput, error rate, mean allocated CPU and memory, mean utilization, resize count, failed or deferred resizes, OOM kills, throttled time.
+7. Summary bars with median and range over repetitions, for the whole run and per phase: p99, throughput, error rate, mean allocated CPU and memory, mean utilization, resize count, failed or deferred resizes, OOM kills, throttled time.
 8. Transfer: figure 7 for window B.
 9. Tuning log table: iteration, observation, knob changed, result.
 
 ## 13. Items to verify before full runs
 
-- **`n`**: re-measure service time and memory per invocation on the ARM server, then fix `n`. Expected demand at `n` = 3M from the Mac figures: about 1.3 cores mean and 12.6 at the peak minute, memory up to about 800 MB above baseline.
-- **Metrics floor**: whether metrics-server on this version accepts 10s, and whether kubelet stats refresh that often.
+- **`n`**: re-measure service time and memory per invocation at 10,000,000 on the ARM server, in a container.
+- **Metrics refresh at 15s**: prototype gate check 4.
 - **System reserve** for `maxAllowed`: value not yet chosen.
-- **Memory per invocation in the container**: the 64 MB figure is a single local measurement outside a container.
+- **Four-day minimum for memory release**: derived by hand from the decaying-histogram rule (section 14), not checked against the 1.7.1 code. It can be verified offline with synthetic daily peaks.
+- **Peak placement**: the derivation assumes the highest memory peak falls on the window's first day. Daily peak-minute rates are similar across window A's days, so the profiling run must confirm where the peak actually falls.
+- **Memory window enforcement**: the docs define the window as 8 intervals with one peak each, but no code was found that removes peaks older than that. Read the checkpoint and aggregate-state code before making claims about the window in the paper.
+- **Design-history citations** for the motivation in section 1.
+- **Per-run overhead**: not measured.
 
 ## 14. Limitations to state in the paper
 
-- **Loops are scaled less than windows.** Statistical windows are scaled 12×, loop intervals and metrics resolution 6× (4× if the floor is 15s). VPA reacts about 2× slower relative to the workload than in production.
-- **Kubelet actuation time is not scaled.** Lag is reported in absolute seconds.
-- **Cold start only.** Each run shows VPA's first scaled day, not steady state. With the confidence interval at 2h, the upper bound is about 13× the estimate after 10 minutes, 5× after 30 minutes, 3× after 1 hour and 2× at the end. Scale-downs from the peak allocation therefore mostly wait for the 1h in-bounds threshold.
-- **Memory recommendations cannot fall within a run under default**, because one 2h aggregation interval covers the whole run.
+- **Kubelet actuation time is not scaled.** It is real work, not a timer. A fixed actuation delay covers a 4× larger share of each burst than in production. Lag is reported in absolute seconds, and the prototype measures how large it is relative to the roughly 45s of loop delay before it.
+- **Each run starts cold.** The first scaled day shows wide bounds: the upper bound is the estimate × (1 + 1/days of history), so about 2× at the end of day 1, 1.5× after day 2, 1.33× after day 3 and 1.25× after day 4. Results are therefore reported per phase.
+- **Half of the memory window is exercised.** A four-day run yields 4 of the 8 daily peaks in VPA's aggregation window.
+- **Memory release under default needs about four scaled days.** The memory target is the 90th percentile of daily peaks, with each peak's weight halving per day of age. A first-day peak holds 33% of the weight after 2 days, 14% after 3 and 6.7% after 4, so it stops setting the target only on day 4 **[verify]**.
 - **Tuned is in-sample on window A** by design (H1). Window B measures transfer only against static and default, not against B's own best configuration.
+- **Tuning cannot explore faster loops**, because 15s is already the practical floor of the metrics path.
 - **One function, one pod, one payload, one trace function.** Results do not cover horizontal scaling, multi-tenancy or other workload shapes.
 - **Client and server share one machine** in the full runs, separated by NUMA node.
 
 ## 15. Future work
 
-- `k = 4` with fully consistent scaling (6h per run, loops and windows all scaled 4×).
-- Pre-warmed history: replay the previous day before each measured run (4h per run).
+- Eight-day runs (48h each at `k = 4`), to exercise VPA's full 8-interval memory window.
 - Hand-tuning on window B as well, to measure the transfer gap against B's own best.
 - A larger tuning budget.
+- Higher compression (`k = 12` or `k = 24`) with a validation run against `k = 4`, to quantify how much compression changes the conclusions.
+
+## Appendix A. Open question: alternative stage order
+
+Status: an open thought from the experimenter, to be discussed with collaborators. It is not part of the agreed design.
+
+**Idea.** To save time, run the stages in this order:
+
+1. Static (no VPA) first.
+2. Tuned VPA next, choosing a good configuration directly from what the static run shows about the workload.
+3. Default VPA last.
+
+**How it differs from section 7.** The agreed procedure starts tuning from a default run and adjusts in response to what default gets wrong. In this alternative, tuning starts from the workload's measured demand in the static run, without first seeing default's behaviour.
+
+**Points to discuss.**
+
+- **What the time saving is.** The stages are the same; the saving comes from getting a tuned result earlier, and from possibly needing fewer tuning iterations if the static run gives enough information to pick a configuration directly.
+- **Effect on H1.** The hypothesis compares tuned with default, so default runs are still needed before H1 can be tested. Running default last delays that test but does not remove it.
+- **Effect on the tuning log.** The log currently records "what default got wrong, which knob fixed it". Under this order the rationale becomes "what the workload looks like, which configuration fits it". Both are hand-tuning, but they tell different stories about how much effort tuning takes.
+- **Selection rule.** The rule in section 7 depends only on static p99, allocation and OOM kills, so it works unchanged in this order.
+- **Risk.** A configuration chosen without seeing default may fix problems default does not have, or miss ones it does.
