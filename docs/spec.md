@@ -253,7 +253,7 @@ One 30-minute run on the Mac minikube cluster. The prototype only verifies the p
 
 1. At least one CPU resize up and one CPU resize down.
 2. At least one memory resize.
-3. All three lag timestamps captured for every resize.
+3. All three lag timestamps captured for every resize. A resize the kubelet refused or deferred and never applied is normal behavior: it is reported, and needs no applied timestamp.
 4. At a 15s metrics resolution, samples from the metrics API are confirmed to refresh every 15s (by polling the pod's `timestamp` and `window` fields under load).
 5. Figures 1–6 render from the collected data.
 

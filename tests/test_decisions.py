@@ -7,7 +7,7 @@ from vpaexp.decisions import Candidate, gate_checks, h1, metrics_refresh_check, 
 from vpaexp.metrics import aggregate, measured_peaks, static_sizing_too_low
 from vpaexp.records import load_run
 
-from .synthetic import MI, pod, res, scenario, write_run
+from .synthetic import MI, audit_rec, audit_resize, pod, res, scenario, write_run
 
 STATIC = Allocation(cpu_millicores=3000, memory_bytes=2000 * MI)
 
@@ -91,6 +91,28 @@ def test_a_static_run_with_an_oom_kill_or_pinned_cpu_flags_the_sizing(tmp_path: 
 def test_gate_passes_when_cpu_moved_both_ways_memory_moved_and_every_lag_is_complete(tmp_path: Path) -> None:
     checks = gate_checks(load_run(scenario(tmp_path)))
     assert [c.passed for c in checks] == [True, True, True]
+
+
+def _run_with_unapplied_resize(d: Path, conditions: list[dict[str, str]]) -> Path:
+    """One applied CPU resize, then a memory decrease that never shows up as applied."""
+    start, big, low = res(1000, 1000), res(2000, 1000), res(2000, 500)
+    return write_run(
+        d,
+        client=[(1.0, 0.1, "ok")],
+        pods=[pod(0.0, start, start), pod(22.0, big, big), pod(60.1, low, big, conditions)],
+        audit=[audit_rec(10.0, big), audit_resize(20.0, big), audit_rec(58.0, low), audit_resize(60.0, low)],
+    )
+
+
+def test_a_resize_the_kubelet_refused_does_not_fail_the_lag_check(tmp_path: Path) -> None:
+    refused = [{"type": "PodResizeInProgress", "status": "True", "reason": "Error"}]
+    check = gate_checks(load_run(_run_with_unapplied_resize(tmp_path, refused)))[2]
+    assert check.passed and "1 of 1" in check.detail and "Error" in check.detail
+
+
+def test_a_resize_that_silently_never_applies_still_fails_the_lag_check(tmp_path: Path) -> None:
+    check = gate_checks(load_run(_run_with_unapplied_resize(tmp_path, [])))[2]
+    assert not check.passed and "1 of 2" in check.detail
 
 
 def test_gate_fails_without_any_resize(tmp_path: Path) -> None:

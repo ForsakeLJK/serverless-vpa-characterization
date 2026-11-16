@@ -76,8 +76,12 @@ class Check:
 def gate_checks(run: Run) -> list[Check]:
     """Prototype gate checks 1-3 (section 11)."""
     s = summarize(run)["whole"]
+    # A resize the kubelet refused or deferred and never applied has no applied timestamp to
+    # capture; that is normal behaviour, so it is reported but not required to be complete.
     attempted = [r for r in run.resizes if r.outcome != "rejected"]
-    complete = sum(r.complete for r in attempted)
+    refused = [r for r in attempted if r.outcome != "applied" and r.issues]
+    required = [r for r in attempted if r not in refused]
+    complete = sum(r.complete for r in required)
     return [
         Check(
             "1. at least one CPU resize up and one down",
@@ -91,8 +95,10 @@ def gate_checks(run: Run) -> list[Check]:
         ),
         Check(
             "3. all three lag timestamps for every resize",
-            bool(attempted) and complete == len(attempted),
-            f"{complete} of {len(attempted)} resizes complete",
+            bool(required) and complete == len(required),
+            f"{complete} of {len(required)} resizes complete"
+            + (f"; {len(refused)} more not applied by the kubelet ({', '.join(sorted({i for r in refused for i in r.issues}))})"
+               if refused else ""),
         ),
     ]
 
