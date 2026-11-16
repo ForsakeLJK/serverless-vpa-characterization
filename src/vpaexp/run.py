@@ -6,9 +6,9 @@ import json
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from vpaexp import config
 from vpaexp.cluster import (
@@ -22,7 +22,7 @@ from vpaexp.cluster import (
 )
 from vpaexp.config import Allocation, VpaFlags
 from vpaexp.loadgen import run_replay
-from vpaexp.metrics import as_json
+from vpaexp.metrics import as_json, container_restarts
 from vpaexp.records import load_run
 from vpaexp.trace import Floats
 
@@ -31,11 +31,15 @@ EXPECTED_RESULT = 0.00033384438552589015  # SeBS expected pagerank[0] for that i
 TIMEOUT_FACTOR = 10
 VPA_SYSTEM_NS = "kube-system"
 
+# static, default and tuned are the settings of section 6. prototype is the gate run (section 11);
+# generous is a sizing or measuring replay with a generous memory limit and no VPA.
+Setting = Literal["static", "default", "tuned", "prototype", "generous"]
+
 
 @dataclass(frozen=True)
 class RunPlan:
     out_dir: Path
-    setting: str  # static, default, tuned, prototype, generous
+    setting: Setting
     slice_name: str
     rep: int
     k: int
@@ -122,7 +126,7 @@ def execute(profile: Profile, plan: RunPlan) -> Path:
         "timeout_s": timeout_s,
         "requests_scheduled": len(plan.schedule),
         "payload": PAYLOAD,
-        "allocation": {"cpu_millicores": plan.allocation.cpu_millicores, "memory_bytes": plan.allocation.memory_bytes},
+        "allocation": asdict(plan.allocation),
         "concurrency_cap": plan.concurrency_cap,
         "vpa_flags": {"recommender": plan.flags.recommender, "updater": plan.flags.updater} if plan.flags else None,
         "manifests": {"deployment": deployment, "vpa": vpa},
@@ -130,7 +134,7 @@ def execute(profile: Profile, plan: RunPlan) -> Path:
         "versions": component_versions(kc),
         **(plan.extra or {}),
     }
-    _write(out / "run.json", meta)
+    write_json(out / "run.json", meta)
 
     recorder = WatchRecorder(kc, out / "watch.jsonl")
     recorder.start()
@@ -151,7 +155,7 @@ def execute(profile: Profile, plan: RunPlan) -> Path:
         time.sleep(max(0.0, meta["replay_start"] + plan.duration_s - time.time()))
     finally:
         meta["replay_start"] = meta["replay_start"] or started
-        _write(out / "run.json", meta)
+        write_json(out / "run.json", meta)
         log("collecting")
         time.sleep(2)
         if poller:
@@ -172,14 +176,18 @@ def execute(profile: Profile, plan: RunPlan) -> Path:
         log(f"{n} audit events extracted")
 
     run = load_run(out)
-    summary = as_json(run)
-    restarts = max((p.restarts for p in run.pods), default=0)
-    summary["container_restarts"] = restarts
+    restarts = container_restarts(run)
+    other = sum(not r.oom for r in restarts)
     if restarts:
-        log(f"WARNING: the function container restarted {restarts} time(s); this run breaks the no-restart assumption")
-    _write(out / "summary.json", summary)
+        # OOM kills and the restarts that follow them are expected under VPA (section 14).
+        log(f"the function container restarted {len(restarts)} time(s), {len(restarts) - other} after an OOM kill")
+    if other:
+        log(f"WARNING: {other} restart(s) had a cause other than an OOM kill; see final-pod.json and final-events.json")
+    write_json(out / "summary.json", as_json(run))
     return out
 
 
-def _write(path: Path, obj: Any) -> None:
+def write_json(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2))
+    log(f"wrote {path}")

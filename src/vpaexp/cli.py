@@ -18,13 +18,12 @@ from vpaexp import config, decisions, figures, metrics, sizing
 from vpaexp.cluster import Profile
 from vpaexp.config import Allocation
 from vpaexp.records import Run, load_run
-from vpaexp.run import RunPlan, execute, log
+from vpaexp.run import RunPlan, Setting, execute, log, write_json
 from vpaexp.trace import DAY_S, K, WINDOWS, Slice, busiest_slice, days, extract_arrivals, load_arrivals, replay_schedule, save_arrivals
 from vpaexp.trace import Floats
 
 TRACE = Path("azure-trace/AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt")
 ARRIVALS = Path("data/arrivals.txt.gz")
-VALIDATION_S = 3600.0
 SETTINGS = ("static", "default", "tuned")
 REPETITIONS = 3  # section 10
 
@@ -37,18 +36,16 @@ class Experiment:
         self.root = Path(args.results) / self.profile.name
         self.arrivals = load_arrivals(ARRIVALS)
 
-    def payload_cost(self) -> dict[str, float]:
+    def payload_cost(self) -> sizing.PayloadCost:
         """Per-request cost: measured on this testbed if `vpaexp measure` has run, else the profile's estimate."""
         path = self.root / "payload-cost.json"
         if path.exists():
-            return dict(json.loads(path.read_text()))
+            return sizing.PayloadCost(**json.loads(path.read_text()))
         log(f"WARNING: no {path}; using the unverified estimates in cluster/{self.profile.name}.toml")
-        p = self.profile
-        return {"service_s": p.service_s, "request_mem_bytes": p.request_mem_bytes, "baseline_mem_bytes": p.baseline_mem_bytes}
+        return self.profile.payload_cost
 
     def demand(self, s: Slice) -> sizing.Demand:
-        c = self.payload_cost()
-        return sizing.offline_demand(replay_schedule(self.arrivals, s), c["service_s"], c["request_mem_bytes"], c["baseline_mem_bytes"])
+        return sizing.offline_demand(replay_schedule(self.arrivals, s), self.payload_cost())
 
     def sizing_path(self, name: str) -> Path:
         return self.root / "sizing" / f"{name}.json"
@@ -61,28 +58,63 @@ class Experiment:
             shutil.rmtree(d)
         return d
 
-    def runs(self, window: str, setting: str) -> list[Run]:
+    def runs(self, window: str, setting: str, label: str) -> list[Run]:
+        """The valid, completed runs of a setting on a window whose label matches the pattern.
+
+        Section 6: a run with any CPU throttling is invalid. It takes no part in any result
+        and is named here so that it gets repeated.
+        """
         found = []
         for d in sorted((self.root / "runs").glob(f"{window}-{setting}-*")):
-            if (d / "run.json").exists() and (d / "client.csv").exists():
-                found.append(load_run(d))
+            if not ((d / "run.json").exists() and (d / "client.csv").exists()):
+                continue
+            run = load_run(d)
+            if not re.fullmatch(label, run.label):
+                continue
+            reason = metrics.invalid_reason(run)
+            if reason:
+                print(f"EXCLUDED, invalid run {d.name}: {reason}")
+            else:
+                found.append(run)
         return found
 
     def allocation(self, memory_bytes: int) -> Allocation:
         """CPU is the profile's fixed, generous value in every run; only memory varies (section 6)."""
         return Allocation(self.profile.generous.cpu_millicores, memory_bytes)
 
-    def plan(self, s: Slice, schedule: Floats, duration_s: float, out: Path, setting: str, alloc: Allocation, cap: int,
-             flags: config.VpaFlags | None, rep: int = 0, **kw: Any) -> RunPlan:
-        return RunPlan(out_dir=out, setting=setting, slice_name=s.name, rep=rep, k=K, schedule=schedule,
-                       duration_s=duration_s, allocation=alloc, concurrency_cap=cap, flags=flags,
-                       service_s=self.payload_cost()["service_s"], **kw)
+    def plan(self, s: Slice, out: Path, setting: Setting, alloc: Allocation, cap: int, flags: config.VpaFlags | None, *,
+             schedule: Floats | None = None, duration_s: float | None = None, rep: int = 0,
+             phase_boundary_s: float | None = None, poll_metrics_api: bool = False,
+             extra: dict[str, Any] | None = None) -> RunPlan:
+        """A run over the slice: all of it, unless a schedule and duration are given."""
+        return RunPlan(
+            out_dir=out, setting=setting, slice_name=s.name, rep=rep, k=K,
+            schedule=replay_schedule(self.arrivals, s) if schedule is None else schedule,
+            duration_s=s.replay_duration_s() if duration_s is None else duration_s,
+            allocation=alloc, concurrency_cap=cap, flags=flags, service_s=self.payload_cost().service_s,
+            phase_boundary_s=phase_boundary_s, poll_metrics_api=poll_metrics_api, extra=extra,
+        )
+
+    def sizing_replay(self, s: Slice, name: str, cap: int, force: bool) -> sizing.Peaks:
+        """Replay the slice with a generous memory limit, the fixed CPU and no VPA; return the measured peaks.
+
+        Section 13: the replay must show no CPU throttling. If it does, no sizing comes of it.
+        """
+        out = self.run_dir(name, force)
+        execute(self.profile, self.plan(s, out, "generous", self.profile.generous, cap, None))
+        run = load_run(out)
+        reason = metrics.invalid_reason(run)
+        if reason:
+            sys.exit(f"SIZING REPLAY INVALID: {reason}. Raise generous_cpu_millicores in the profile and repeat it ({out}).")
+        return metrics.measured_peaks(run)
 
 
-def _write(path: Path, obj: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2))
-    log(f"wrote {path}")
+def _report_validity(run: Run) -> bool:
+    """Section 6: any CPU throttling makes a run invalid. Says so, and returns whether the run is valid."""
+    reason = metrics.invalid_reason(run)
+    if reason:
+        print(f"RUN INVALID: {reason}. Raise generous_cpu_millicores in the profile and repeat the run.")
+    return reason is None
 
 
 def cmd_extract(args: argparse.Namespace) -> None:
@@ -98,23 +130,18 @@ def cmd_measure(args: argparse.Namespace) -> None:
     schedule = lead_in + gap * np.arange(n, dtype=np.float64)
     s = Slice("measure", 0.0, 0.0)
     out = exp.run_dir("measure", args.force)
-    execute(exp.profile, exp.plan(s, schedule, lead_in + gap * n, out, "generous", exp.profile.generous, 4, None))
+    execute(exp.profile, exp.plan(s, out, "generous", exp.profile.generous, 4, None,
+                                  schedule=schedule, duration_s=lead_in + gap * n))
     run = load_run(out)
-    ok = run.client.status == "ok"
-    if not ok.all():
-        sys.exit(f"{int((~ok).sum())} of {n} requests failed; see {out}")
+    failed = int(np.sum(run.client.status != "ok"))
+    if failed:
+        sys.exit(f"{failed} of {n} requests failed; see {out}")
     if float(np.max(run.samples.memory_peak_bytes, initial=0.0)) <= 0:
         sys.exit("the node's kernel does not expose memory.peak (needs Linux 5.19+); per-request memory cannot be measured")
-    idle = run.samples.memory_bytes[run.samples.t < run.t0 + lead_in - 1]
-    baseline = float(np.median(idle))
-    cost = {
-        "service_s": float(np.median(run.client.completed - run.client.sent)),
-        "request_mem_bytes": float(np.max(run.samples.memory_peak_bytes)) - baseline,
-        "baseline_mem_bytes": baseline,
-    }
-    _write(exp.root / "payload-cost.json", cost)
-    print(f"service time {cost['service_s'] * 1000:.0f} ms (trace function median: 380 ms); "
-          f"memory {cost['request_mem_bytes'] / sizing.MI:.0f} MiB above a {baseline / sizing.MI:.0f} MiB baseline")
+    cost = metrics.payload_cost(run, lead_in)
+    write_json(exp.root / "payload-cost.json", asdict(cost))
+    print(f"service time {cost.service_s * 1000:.0f} ms (trace function median: 380 ms); "
+          f"memory {cost.request_mem_bytes / config.MI:.0f} MiB above a {cost.baseline_mem_bytes / config.MI:.0f} MiB baseline")
 
 
 def cmd_size(args: argparse.Namespace) -> None:
@@ -122,7 +149,7 @@ def cmd_size(args: argparse.Namespace) -> None:
     exp = Experiment(args)
     window = WINDOWS[args.window]
     demand = exp.demand(window)
-    record: dict[str, Any] = {"window": window.name, "payload_cost": exp.payload_cost(), "demand": demand.to_json()}
+    record: dict[str, Any] = {"window": window.name, "payload_cost": asdict(exp.payload_cost()), "demand": demand.to_json()}
     generous = exp.profile.generous
     if demand.peaks.memory_bytes > generous.memory_bytes:
         log("WARNING: calculated peak memory exceeds the profile's generous limit")
@@ -132,23 +159,17 @@ def cmd_size(args: argparse.Namespace) -> None:
     cap = sizing.CAP_FACTOR * demand.peaks.concurrency
 
     if args.validate:
-        # Centre the hour on the calculated memory peak.
-        lo = min(max(demand.memory_at_s - VALIDATION_S / 2, 0.0), window.replay_duration_s() - VALIDATION_S)
-        s = Slice(f"{window.name}-validate", window.trace_start_s + lo * K, VALIDATION_S * K)
+        s = sizing.validation_slice(window, demand.peak_at_s)
         slice_calc = exp.demand(s).peaks
-        out = exp.run_dir(s.name, args.force)
-        execute(exp.profile, exp.plan(s, replay_schedule(exp.arrivals, s), VALIDATION_S, out, "generous", generous, cap, None))
-        measured = metrics.measured_peaks(load_run(out))
+        measured = exp.sizing_replay(s, s.name, cap, args.force)
         record |= {"method": "validated", "slice_calc": asdict(slice_calc), "slice_measured": asdict(measured)}
         try:
             result = sizing.static_sizing(demand.peaks, slice_calc, measured)
         except sizing.ToleranceExceeded as e:
-            _write(exp.sizing_path(window.name + "-failed-validation"), record | {"error": str(e)})
+            write_json(exp.sizing_path(window.name + "-failed-validation"), record | {"error": str(e)})
             sys.exit(f"validation failed: {e}\nrun: vpaexp size --window {window.name} --full-profile")
     elif args.full_profile:
-        out = exp.run_dir(f"{window.name}-profile", args.force)
-        execute(exp.profile, exp.plan(window, replay_schedule(exp.arrivals, window), window.replay_duration_s(), out, "generous", generous, cap, None))
-        measured = metrics.measured_peaks(load_run(out))
+        measured = exp.sizing_replay(window, f"{window.name}-profile", cap, args.force)
         record |= {"method": "profiled", "measured": asdict(measured)}
         result = sizing.sizing_from_peaks(measured)
     else:
@@ -158,7 +179,7 @@ def cmd_size(args: argparse.Namespace) -> None:
     record["sizing"] = result.to_json()
     print(json.dumps(record, indent=2))
     if args.validate or args.full_profile or args.write_unvalidated:
-        _write(exp.sizing_path(window.name), record)
+        write_json(exp.sizing_path(window.name), record)
     else:
         print("not saved: this is the calculation alone. Use --validate (or --write-unvalidated for smoke tests).")
 
@@ -194,24 +215,21 @@ def cmd_run(args: argparse.Namespace) -> None:
         schedule, duration, label = schedule[schedule < args.limit_s], args.limit_s, f"{label}-smoke"
     boundary = DAY_S / K
     out = exp.run_dir(f"{window.name}-{args.setting}-{label}", args.force)
-    plan = exp.plan(window, schedule, duration, out, args.setting, exp.allocation(size.memory_bytes),
-                    size.concurrency_cap, _flags(args.setting, args.config), rep=args.rep,
+    plan = exp.plan(window, out, args.setting, exp.allocation(size.memory_bytes),
+                    size.concurrency_cap, _flags(args.setting, args.config),
+                    schedule=schedule, duration_s=duration, rep=args.rep,
                     phase_boundary_s=boundary if duration > boundary else None,
                     extra={"label": label, "tuned_config": args.config})
     execute(exp.profile, plan)
     run = load_run(out)
     print(json.dumps(metrics.summarize(run)["whole"], indent=2))
     print(figures.run_figures(run, out / "figures")[-1])
-    _warn_if_cpu_limiting(run)
     if args.setting == "static" and not args.limit_s:
-        for problem in metrics.static_sizing_too_low(run):
+        problem = metrics.static_sizing_too_low(run)
+        if problem:
             print(f"SIZING TOO LOW ({problem}): redo sizing with --full-profile and repeat the affected runs")
-
-
-def _warn_if_cpu_limiting(run: Run) -> None:
-    problem = metrics.cpu_was_limiting(run)
-    if problem:
-        print(f"CPU NOT GENEROUS: {problem}. Raise generous_cpu_millicores in the profile and repeat the run.")
+    if not _report_validity(run):
+        sys.exit(1)
 
 
 def cmd_prototype(args: argparse.Namespace) -> None:
@@ -222,8 +240,7 @@ def cmd_prototype(args: argparse.Namespace) -> None:
     alloc = exp.allocation(min(size.memory_bytes, exp.profile.generous.memory_bytes))
     flags = config.vpa_flags(K, config.PROTOTYPE_FLAGS, restrict_to_declared=False)
     out = exp.run_dir("proto-prototype-r1", args.force)
-    execute(exp.profile, exp.plan(s, replay_schedule(exp.arrivals, s), s.replay_duration_s(), out, "prototype", alloc,
-                                  size.concurrency_cap, flags, rep=1, poll_metrics_api=True))
+    execute(exp.profile, exp.plan(s, out, metrics.PROTOTYPE, alloc, size.concurrency_cap, flags, rep=1, poll_metrics_api=True))
     sys.exit(_gate(out))
 
 
@@ -240,8 +257,11 @@ def _gate(run_dir: Path) -> int:
         checks.append(decisions.Check("5. figures 1-6 render", False, repr(e)))
     for c in checks:
         print(f"{'PASS' if c.passed else 'FAIL'}  {c.name}: {c.detail}")
-    passed = all(c.passed for c in checks)
-    _warn_if_cpu_limiting(run)
+    valid = _report_validity(run)
+    throttled = metrics.cpu_was_limiting(run)
+    if valid and throttled:
+        print(f"NOTE: {throttled}. The prototype run is exempt from the CPU validity check (section 11).")
+    passed = valid and all(c.passed for c in checks)
     print("GATE PASSED" if passed else "GATE FAILED: no full run may start")
     return 0 if passed else 1
 
@@ -256,17 +276,16 @@ def cmd_figures(args: argparse.Namespace) -> None:
         print(p)
 
 
-def _repetitions(exp: Experiment, window: str, setting: str) -> list[Run]:
-    return [r for r in exp.runs(window, setting) if re.fullmatch(r"r\d+", str(r.meta.get("label", "")))]
+REPETITION, ITERATION = r"r\d+", r"it\d+"  # run labels: a repetition of a setting, a tuning iteration
 
 
 def cmd_report(args: argparse.Namespace) -> None:
-    """Figure 7 (window A) or 8 (window B), the H1 verdict, and the static sizing check."""
+    """Figure 7 and the H1 verdict (window A) or figure 8 (window B), and the static sizing check."""
     exp = Experiment(args)
-    by_setting = {s: _repetitions(exp, args.window, s) for s in SETTINGS}
+    by_setting = {s: exp.runs(args.window, s, REPETITION) for s in SETTINGS}
     by_setting = {s: runs for s, runs in by_setting.items() if runs}
     if not by_setting:
-        sys.exit(f"no completed runs for window {args.window} under {exp.root / 'runs'}")
+        sys.exit(f"no valid completed runs for window {args.window} under {exp.root / 'runs'}")
     summaries = {s: [metrics.summarize(r) for r in runs] for s, runs in by_setting.items()}
     out = exp.root / "report"
     report: dict[str, Any] = {
@@ -277,41 +296,45 @@ def cmd_report(args: argparse.Namespace) -> None:
     n = 7 if args.window == "A" else 8
     print(figures.fig7_summary(summaries, out / f"fig{n}-summary-{args.window}.png", f"Window {args.window}"))
     short = [s for s in ("default", "tuned") if len(summaries.get(s, [])) < REPETITIONS]
-    if short:
-        print(f"H1 not evaluated: fewer than {REPETITIONS} repetitions of {' and '.join(short)}")
+    if args.window != "A":
+        pass  # H1 is tested on window A only (section 1); window B is the transfer evaluation
+    elif short:
+        print(f"H1 not evaluated: fewer than {REPETITIONS} valid repetitions of {' and '.join(short)}")
     else:
         report["h1"] = decisions.h1([s["whole"] for s in summaries["default"]], [s["whole"] for s in summaries["tuned"]])
-        print(f"H1 {'supported' if report['h1']['supported'] else 'rejected'} on window {args.window}")
+        print(f"H1 {'supported' if report['h1']['supported'] else 'rejected'} on window A")
     for run in by_setting.get("static", []):
-        for problem in metrics.static_sizing_too_low(run):
+        problem = metrics.static_sizing_too_low(run)
+        if problem:
             print(f"SIZING TOO LOW in {run.path.name}: {problem}")
-    _write(out / f"report-{args.window}.json", report)
+    write_json(out / f"report-{args.window}.json", report)
 
 
 def cmd_tune_select(args: argparse.Namespace) -> None:
     """Section 7 selection rule over the tuning iterations (runs labelled it1, it2, ...)."""
     exp = Experiment(args)
-    static = _repetitions(exp, "A", "static")
-    iterations = [r for r in exp.runs("A", "tuned") if re.fullmatch(r"it\d+", str(r.meta.get("label", "")))]
+    static = exp.runs("A", "static", REPETITION)
+    iterations = exp.runs("A", "tuned", ITERATION)
     if not static or not iterations:
-        sys.exit("need at least one full static run and one tuning iteration (--setting tuned --label itN) on window A")
-    static_whole = [metrics.summarize(r)["whole"] for r in static]
-    # "No worse than static" is judged against the worst static repetition, so that the
-    # run-to-run spread of static itself does not reject an iteration.
-    static_p99 = max(w["p99_s"] for w in static_whole)
-    static_failed = max(w["timeout_rate"] + w["error_rate"] for w in static_whole)
-    candidates = []
-    for r in iterations:
-        w = metrics.summarize(r)["whole"]
-        candidates.append(decisions.Candidate(str(r.meta["label"]), w["alloc_mem_bytes"], w["p99_s"],
-                                             w["timeout_rate"] + w["error_rate"], w["oom_kills"]))
-    chosen, met = decisions.select_tuned(candidates, static_p99, static_failed)
-    result = {"static_p99_s": static_p99, "static_failed_rate": static_failed, "static_runs": len(static), "candidates": [asdict(c) for c in candidates], "chosen": chosen.name, "constraint_met": met}
+        sys.exit("need at least one valid full static run and one valid tuning iteration "
+                 "(--setting tuned --label itN) on window A")
+    selection = decisions.select_tuned(
+        {r.label: metrics.summarize(r)["whole"] for r in iterations},
+        [metrics.summarize(r)["whole"] for r in static],
+    )
+    result = {
+        "static_p99_s": selection.static_p99_s,
+        "static_failed_rate": selection.static_failed_rate,
+        "static_runs": len(static),
+        "candidates": [asdict(c) for c in selection.candidates],
+        "chosen": selection.chosen.name,
+        "constraint_met": selection.quality_kept,
+    }
     print(json.dumps(result, indent=2))
-    if not met:
+    if not selection.quality_kept:
         print("SERVICE QUALITY NOT KEPT by any iteration (p99 and failed-request rate no worse than static); "
               "the one with the fewest failed requests was chosen. Report this.")
-    _write(exp.root / "report" / "tuning-selection.json", result)
+    write_json(exp.root / "report" / "tuning-selection.json", result)
 
 
 def cmd_tuning_log(args: argparse.Namespace) -> None:

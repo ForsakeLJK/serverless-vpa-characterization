@@ -11,9 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
-from vpaexp.config import Allocation
-from vpaexp.records import parse_memory
-from vpaexp.sizing import MI
+from vpaexp.config import APP, MI, Allocation
+from vpaexp.records import audit_time, parse_memory
+from vpaexp.sizing import PayloadCost
 
 
 @dataclass(frozen=True)
@@ -26,12 +26,10 @@ class Profile:
     audit_log_cmd: list[str]
     generous: Allocation  # CPU: the fixed CPU of every run. Memory: the limit of sizing replays.
     system_reserve_memory_bytes: int
-    service_s: float
-    request_mem_bytes: int
-    baseline_mem_bytes: int
-    namespace: str = "vpaexp"
-    image: str = "vpaexp-function:1"
-    client_numa_node: int | None = None
+    payload_cost: PayloadCost  # the unverified estimate; `vpaexp measure` replaces it
+    namespace: str
+    image: str
+    client_numa_node: int | None
 
     @staticmethod
     def load(path: Path) -> Profile:
@@ -43,9 +41,7 @@ class Profile:
             audit_log_cmd=d["audit_log_cmd"],
             generous=Allocation(d["generous_cpu_millicores"], d["generous_memory_mib"] * MI),
             system_reserve_memory_bytes=d["system_reserve_memory_mib"] * MI,
-            service_s=d["service_s"],
-            request_mem_bytes=d["request_mem_mib"] * MI,
-            baseline_mem_bytes=d["baseline_mem_mib"] * MI,
+            payload_cost=PayloadCost(d["service_s"], d["request_mem_mib"] * MI, d["baseline_mem_mib"] * MI),
             namespace=d.get("namespace", "vpaexp"),
             image=d.get("image", "vpaexp-function:1"),
             client_numa_node=d.get("client_numa_node"),
@@ -106,7 +102,7 @@ class WatchRecorder:
     _out: IO[str] | None = None
 
     WATCHES = {
-        "pod": ["pods", "-l", "app=function"],
+        "pod": ["pods", "-l", f"app={APP}"],
         "vpa": ["verticalpodautoscalers.autoscaling.k8s.io"],
         "event": ["events"],
     }
@@ -190,8 +186,6 @@ class MetricsApiPoller:
 
 def extract_audit(cmd: list[str], since_epoch: float, out_path: Path) -> int:
     """Copy this run's events from the API server audit log (the policy logs only what the analysis needs)."""
-    from vpaexp.records import _audit_time
-
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
     assert proc.stdout is not None
     n = 0
@@ -201,7 +195,7 @@ def extract_audit(cmd: list[str], since_epoch: float, out_path: Path) -> int:
                 continue
             try:
                 event = json.loads(line)
-                if _audit_time(event) < since_epoch:
+                if audit_time(event) < since_epoch:
                     continue
             except (ValueError, KeyError):
                 continue

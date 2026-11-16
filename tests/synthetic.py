@@ -41,6 +41,22 @@ def pod(t: float, spec: dict[str, str], status: dict[str, str], conditions: list
     }
 
 
+def event(t: float, reason: str, resources: dict[str, str]) -> dict[str, Any]:
+    """A kubelet event about a resize of the function pod, in the form the watch recorder stores."""
+    resize = {"containers": [{"name": "function", "resources": {"limits": resources, "requests": resources}}], "generation": 2}
+    return {
+        "t": T0 + t,
+        "kind": "event",
+        "type": "ADDED",
+        "object": {
+            "involvedObject": {"kind": "Pod", "name": "function-abc"},
+            "reason": reason,
+            "firstTimestamp": datetime.fromtimestamp(T0 + t, UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "message": f"Pod resize: {json.dumps(resize)}",
+        },
+    }
+
+
 def rec_obj(target: dict[str, str], lower: dict[str, str], upper: dict[str, str]) -> dict[str, Any]:
     target, lower, upper = ({"memory": r["memory"]} for r in (target, lower, upper))  # a memory-only VPA recommends no CPU
     return {
@@ -110,6 +126,7 @@ def write_run(
     pods: list[dict[str, Any]] | None = None,
     vpas: list[dict[str, Any]] | None = None,
     audit: list[dict[str, Any]] | None = None,
+    events: list[dict[str, Any]] | None = None,
     meta: dict[str, Any] | None = None,
 ) -> Path:
     d.mkdir(parents=True, exist_ok=True)
@@ -138,7 +155,7 @@ def write_run(
             prev = off
             f.write(f"{T0 + off},{usage:.0f},0,{nthr},{thr_s * 1e6:.0f},{mem_mi * MI:.0f},{mem_mi * MI:.0f},{oom}\n")
     with open(d / "watch.jsonl", "w") as f:
-        for r in sorted((pods or []) + (vpas or []), key=lambda r: r["t"]):
+        for r in sorted((pods or []) + (vpas or []) + (events or []), key=lambda r: r["t"]):
             f.write(json.dumps(r) + "\n")
     with open(d / "audit.jsonl", "w") as f:
         for e in audit or []:

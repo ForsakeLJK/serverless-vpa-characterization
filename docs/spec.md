@@ -179,6 +179,7 @@ The configuration chosen by the procedure in section 7.
 - `controlledResources: ["memory"]`. VPA neither recommends nor changes CPU.
 - `controlledValues: RequestsAndLimits`, so the 1:1 memory request-to-limit ratio is preserved.
 - `maxAllowed` (memory): node allocatable memory minus a fixed system reserve **[verify value]**, the same for both settings.
+- `minReplicas: 1` in the update policy. The updater skips workloads with fewer replicas than its `--min-replicas` flag (default 2); the per-object setting lets it act on the single function pod without changing a component flag.
 - Initial pod allocation: the static memory allocation for that window, and the fixed CPU.
 
 ## 7. Tuning procedure
@@ -259,7 +260,7 @@ Per-run reset and collection overhead is extra and not yet measured. A window wh
 
 ## 11. Prototype gate
 
-One 30-minute run on the Mac minikube cluster. The prototype only verifies the pipeline, so it does not follow the `k = 4` principle: it replays a busy 2h slice of day 2 at `k = 4`, with VPA windows shortened far below the `k = 4` values so that resizes occur within the run. It uses the same function and payload as the full runs. No full run starts until all five checks pass:
+One 30-minute run on the Mac minikube cluster. The prototype only verifies the pipeline, so it does not follow the `k = 4` principle: it replays a busy 2h slice of day 2 at `k = 4`, with VPA windows shortened far below the `k = 4` values so that resizes occur within the run. It uses the same function and payload as the full runs. The CPU validity check of section 6 does not apply to this run: the 4-vCPU VM cannot give the function generous CPU, so throttling is reported but does not make the run invalid. No full run starts until all five checks pass:
 
 1. At least one memory resize up and one memory resize down.
 2. CPU is never resized: the pod's CPU request and limit stay at the fixed value for the whole run.
@@ -276,7 +277,7 @@ One 30-minute run on the Mac minikube cluster. The prototype only verifies the p
 5. Request outcomes over time: requests per 1-minute bucket that completed, timed out or errored, stacked.
 6. Lag breakdown per resize as a stacked bar: recommendation updated to pod patched, pod patched to kubelet applied.
 
-Figures 2–5 mark every OOM kill. Figures are rendered at 300 dpi, and every run also gets an overview page with figures 1–6 together.
+Figures 1–5 mark every OOM kill. Figures are rendered at 300 dpi, and every run also gets an overview page with figures 1–6 together.
 
 7. Summary bars with median and range over repetitions, for the whole run and per phase: p99, throughput, error rate, mean allocated memory, mean memory utilization, resize count, failed or deferred resizes, OOM kills.
 8. Transfer: figure 7 for window B.

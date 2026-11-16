@@ -24,7 +24,7 @@ def test_arrival_is_end_minus_duration_for_the_chosen_function_only(tmp_path: Pa
         "a,other,3.0,1.0\n"
         "a,cc5bb2108cc7zzz,4.0,3.0\n"
     )
-    arrivals = extract_arrivals(trace, "cc5bb2108cc7")
+    arrivals = extract_arrivals(trace)
     assert arrivals.tolist() == [1.0, 10.0]
 
 

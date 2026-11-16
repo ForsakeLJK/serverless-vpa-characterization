@@ -5,39 +5,16 @@ from __future__ import annotations
 import asyncio
 import csv
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
 import aiohttp
 import numpy as np
-from numpy.typing import NDArray
 
 from vpaexp.trace import Floats
 
 RESULT_TOLERANCE = 1e-9  # the tolerance SeBS's validate_output uses
-HEADER = ["scheduled", "sent", "completed", "status"]
-
-
-@dataclass(frozen=True)
-class ClientLog:
-    """One row per request. Times are epoch seconds; status is ok, error or timeout."""
-
-    scheduled: Floats
-    sent: Floats
-    completed: Floats
-    status: NDArray[np.str_]
-
-
-def read_client_log(path: Path) -> ClientLog:
-    with open(path) as f:
-        rows = list(csv.DictReader(f))
-    rows.sort(key=lambda r: float(r["scheduled"]))
-
-    def col(name: str) -> Floats:
-        return np.array([float(r[name]) for r in rows], dtype=np.float64)
-
-    return ClientLog(col("scheduled"), col("sent"), col("completed"), np.array([r["status"] for r in rows], dtype=str))
+HEADER = ["scheduled", "sent", "completed", "status"]  # status is ok, error or timeout; read by records.read_client_log
 
 
 def run_replay(
@@ -78,7 +55,7 @@ async def _replay(
                 if delay > 0:
                     await asyncio.sleep(delay)
                 task = asyncio.create_task(
-                    _one(session, url, payload, expected_result, epoch(mono0 + offset), epoch, out, f)
+                    _send_one(session, url, payload, expected_result, epoch(mono0 + offset), epoch, out, f)
                 )
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
@@ -87,7 +64,7 @@ async def _replay(
     return epoch0
 
 
-async def _one(
+async def _send_one(
     session: aiohttp.ClientSession,
     url: str,
     payload: dict[str, Any],

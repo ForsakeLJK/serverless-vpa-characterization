@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 from aiohttp import web
 
-from vpaexp.loadgen import ClientLog, read_client_log, run_replay
+from vpaexp.loadgen import run_replay
+from vpaexp.records import ClientLog, read_client_log
 
 Handler = Callable[[web.Request], "asyncio.Future[web.Response] | object"]
 

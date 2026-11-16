@@ -1,22 +1,31 @@
 import numpy as np
 import pytest
 
-from vpaexp.sizing import Peaks, ToleranceExceeded, offline_demand, static_sizing
+from vpaexp.sizing import PayloadCost, Peaks, ToleranceExceeded, offline_demand, static_sizing, validation_slice
+from vpaexp.trace import WINDOWS
 
 MB = 1024 * 1024
 
 
 def test_overlapping_requests_set_peak_concurrency_and_memory() -> None:
-    d = offline_demand(np.array([0.0, 0.1, 0.2, 5.0]), service_s=0.33, request_mem=115 * MB, baseline_mem=33 * MB)
+    d = offline_demand(np.array([0.0, 0.1, 0.2, 5.0]), PayloadCost(0.33, 115 * MB, 33 * MB))
     assert d.peaks.concurrency == 3
-    assert d.concurrency_at_s == pytest.approx(0.2)
     assert d.peaks.memory_bytes == (33 + 3 * 115) * MB
-    assert d.memory_at_s == pytest.approx(0.2)
+    assert d.peak_at_s == pytest.approx(0.2)
 
 
 def test_a_request_ending_as_another_starts_does_not_overlap() -> None:
-    d = offline_demand(np.array([0.0, 1.0]), service_s=1.0, request_mem=MB, baseline_mem=0)
+    d = offline_demand(np.array([0.0, 1.0]), PayloadCost(1.0, MB, 0))
     assert d.peaks.concurrency == 1
+
+
+def test_the_validation_hour_is_centred_on_the_peak_and_stays_inside_the_window() -> None:
+    window = WINDOWS["A"]  # replays in 24h
+    middle = validation_slice(window, peak_at_s=10 * 3600.0)
+    assert middle.trace_start_s == window.trace_start_s + 9.5 * 3600 * 4 and middle.replay_duration_s() == 3600
+    assert validation_slice(window, peak_at_s=60.0).trace_start_s == window.trace_start_s
+    late = validation_slice(window, peak_at_s=24 * 3600.0 - 60)
+    assert late.trace_start_s + late.trace_duration_s == window.trace_start_s + window.trace_duration_s
 
 
 def test_static_memory_adds_15_percent_and_concurrency_is_capped_at_4x_peak() -> None:

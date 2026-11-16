@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from vpaexp.metrics import cpu_was_limiting, oom_kill_times, summarize
+from vpaexp.metrics import as_json, cpu_was_limiting, invalid_reason, oom_kill_times, payload_cost, static_sizing_too_low, summarize
 from vpaexp.records import load_run
 
-from .synthetic import MI, T0, audit_rec, audit_resize, audit_status, pod, res, scenario, write_run
+from .synthetic import MI, T0, audit_rec, audit_resize, audit_status, event, pod, res, scenario, write_run
 
 
 def test_latency_counts_timeouts_at_the_timeout_value_and_reports_errors_separately(tmp_path: Path) -> None:
@@ -87,6 +87,36 @@ def test_a_rejected_patch_and_a_never_applied_resize_both_count_as_failed(tmp_pa
     assert w["resizes"] == 0 and w["resizes_failed_or_deferred"] == 2
 
 
+def test_a_resize_still_pending_with_nothing_reported_is_neither_failed_nor_deferred(tmp_path: Path) -> None:
+    start, big = res(1000), res(2000)
+    d = write_run(  # cut off by the end of the run before the kubelet applied it
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        pods=[pod(0.0, start, start), pod(95.1, big, start)],
+        audit=[audit_rec(90.0, big), audit_resize(95.0, big)],
+    )
+    run = load_run(d)
+    assert run.resizes[0].outcome == "pending" and run.resizes[0].issues == ()
+    assert summarize(run)["whole"]["resizes_failed_or_deferred"] == 0
+
+
+def test_a_resize_problem_the_kubelet_reports_only_as_an_event_is_counted(tmp_path: Path) -> None:
+    start, big, low = res(1000), res(2000), res(500)
+    stale = event(-600.0, "ResizeError", low)  # left in the namespace by an earlier run
+    other = event(61.0, "ResizeError", low)
+    other["object"]["involvedObject"]["name"] = "sampler"
+    d = write_run(
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        pods=[pod(0.0, start, start), pod(22.0, big, big), pod(60.1, low, big)],
+        audit=[audit_rec(10.0, big), audit_resize(20.0, big), audit_rec(58.0, low), audit_resize(60.0, low)],
+        events=[stale, other, event(61.0, "ResizeDeferred", low), event(75.0, "ResizeError", low), event(21.0, "ResizeStarted", big)],
+    )
+    run = load_run(d)
+    assert [r.issues for r in run.resizes] == [(), ("Deferred", "Error")]
+    assert summarize(run)["whole"]["resizes_failed_or_deferred"] == 1
+
+
 def test_oom_kills_come_from_the_cgroup_counter(tmp_path: Path) -> None:
     s = summarize(load_run(scenario(tmp_path)))
     assert s["whole"]["oom_kills"] == 1 and s["first_day"]["oom_kills"] == 0 and s["warmed"]["oom_kills"] == 1
@@ -100,6 +130,26 @@ def test_cpu_is_not_a_result_but_throttling_flags_a_run_whose_cpu_was_not_genero
     assert cpu_was_limiting(throttled) == "CPU was throttled for 0.2s (0.2% of the run)"
     quiet = write_run(tmp_path / "b", client=[(1.0, 0.1, "ok")], sampler=[(float(i), 0.1, 100.0, 0, 0, 0.0) for i in range(5)])
     assert cpu_was_limiting(load_run(quiet)) is None
+
+
+def test_any_cpu_throttling_makes_a_run_invalid_except_the_prototype_run(tmp_path: Path) -> None:
+    throttled = load_run(scenario(tmp_path / "a"))
+    assert invalid_reason(throttled) == cpu_was_limiting(throttled)
+    summary = as_json(throttled)
+    assert summary["valid"] is False and "throttled" in summary["invalid_reason"]
+    prototype = load_run(scenario(tmp_path / "b", setting="prototype"))
+    assert cpu_was_limiting(prototype) and invalid_reason(prototype) is None and as_json(prototype)["valid"] is True
+
+
+def test_payload_cost_is_the_median_service_time_and_the_peak_memory_above_the_idle_baseline(tmp_path: Path) -> None:
+    d = write_run(
+        tmp_path,
+        client=[(10.0, 0.30, "ok"), (13.0, 0.34, "ok"), (16.0, 0.32, "ok")],
+        sampler=[(float(i), 0.1, 148.0 if i in (11, 14, 17) else 33.0, 0, 0, 0.0) for i in range(20)],
+    )
+    cost = payload_cost(load_run(d), lead_in_s=10.0)
+    assert cost.service_s == pytest.approx(0.32)
+    assert (cost.baseline_mem_bytes, cost.request_mem_bytes) == (33 * MI, 115 * MI)
 
 
 def test_recommendation_series_is_read_from_the_vpa_watch(tmp_path: Path) -> None:
@@ -143,9 +193,7 @@ def test_a_resize_is_not_applied_while_the_kubelet_still_reports_it_in_progress(
     assert resize.applied_t == T0 + 24.0
 
 
-def test_container_restarts_are_counted_and_flag_a_static_run(tmp_path: Path) -> None:
-    from vpaexp.metrics import static_sizing_too_low
-
+def test_an_oom_kill_of_the_container_is_counted_and_flags_a_static_run(tmp_path: Path) -> None:
     a = res(1000)
     d = write_run(
         tmp_path,
@@ -158,7 +206,34 @@ def test_container_restarts_are_counted_and_flag_a_static_run(tmp_path: Path) ->
     assert s["whole"]["container_restarts"] == 1
     assert s["whole"]["oom_kills"] == 1  # the container-level OOM never reaches the cgroup counter we sample
     assert s["first_day"]["container_restarts"] == 0 and s["warmed"]["container_restarts"] == 1
-    assert static_sizing_too_low(run) == ["container restart"]  # (the cgroup counter itself stayed at zero)
+    assert static_sizing_too_low(run) == "1 OOM kill"  # (the cgroup counter itself stayed at zero)
+
+
+def test_a_restart_that_was_not_an_oom_kill_is_counted_but_says_nothing_about_the_sizing(tmp_path: Path) -> None:
+    a = res(1000)
+    d = write_run(
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        sampler=[(float(i), 0.1, 100.0, 0, 0, 0.0) for i in range(30)],
+        pods=[pod(0.0, a, a), pod(50.0, a, a, restarts=1, last_exit="Error")],
+    )
+    run = load_run(d)
+    whole = summarize(run)["whole"]
+    assert (whole["container_restarts"], whole["oom_kills"]) == (1, 0)
+    assert static_sizing_too_low(run) is None
+
+
+def test_a_container_oom_kill_belongs_to_the_phase_of_the_kill_not_of_the_later_restart(tmp_path: Path) -> None:
+    a = res(1000)
+    d = write_run(  # killed at 38s, just before the phase boundary at 40s; seen restarted at 52s
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        sampler=[(float(i), 0.1, 100.0, 0, 0, 0.0) for i in range(30)],
+        pods=[pod(0.0, a, a), pod(52.0, a, a, restarts=1, last_exit="OOMKilled", exited_at=38.0)],
+    )
+    s = summarize(load_run(d))
+    assert (s["first_day"]["oom_kills"], s["warmed"]["oom_kills"]) == (1, 0)
+    assert (s["first_day"]["container_restarts"], s["warmed"]["container_restarts"]) == (1, 0)
 
 
 def test_audit_events_of_other_objects_on_the_cluster_are_ignored(tmp_path: Path) -> None:

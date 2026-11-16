@@ -1,20 +1,27 @@
 from pathlib import Path
 
-import pytest
 
-from vpaexp.decisions import Candidate, gate_checks, h1, metrics_refresh_check, select_tuned
+from vpaexp.decisions import gate_checks, h1, metrics_refresh_check, select_tuned
 from vpaexp.metrics import aggregate, measured_peaks, static_sizing_too_low
 from vpaexp.records import load_run
 
 from .synthetic import MI, audit_rec, audit_resize, pod, res, scenario, write_run
 
-def cand(name: str, mem_mi: float, p99: float = 0.40, failed: float = 0.0, ooms: int = 0) -> Candidate:
-    return Candidate(name, mem_mi * MI, p99, failed, ooms)
+Named = tuple[str, dict[str, float]]
 
 
-def pick(candidates: list[Candidate], static_failed: float = 0.0) -> tuple[str, bool]:
-    chosen, kept = select_tuned(candidates, static_p99_s=0.4, static_failed_rate=static_failed)
-    return chosen.name, kept
+def whole(mem_mi: float = 0, p99: float = 0.40, failed: float = 0.0, ooms: int = 0) -> dict[str, float]:
+    """A whole-run summary; the failed requests are split between timeouts and errors."""
+    return {"alloc_mem_bytes": mem_mi * MI, "p99_s": p99, "timeout_rate": failed / 2, "error_rate": failed / 2, "oom_kills": ooms}
+
+
+def cand(name: str, mem_mi: float, p99: float = 0.40, failed: float = 0.0, ooms: int = 0) -> Named:
+    return name, whole(mem_mi, p99, failed, ooms)
+
+
+def pick(candidates: list[Named], static_failed: float = 0.0) -> tuple[str, bool]:
+    selection = select_tuned(dict(candidates), [whole(p99=0.4, failed=static_failed)])
+    return selection.chosen.name, selection.quality_kept
 
 
 def test_tuned_is_the_iteration_with_the_least_memory_that_keeps_service_quality() -> None:
@@ -41,6 +48,13 @@ def test_among_iterations_within_5_percent_on_memory_the_fewest_oom_kills_wins()
 
 def test_when_no_iteration_keeps_service_quality_the_fewest_failed_requests_wins_and_it_is_reported() -> None:
     assert pick([cand("it1", 300, p99=0.9, failed=0.05), cand("it2", 300, p99=0.6, failed=0.02)]) == ("it2", False)
+
+
+def test_static_is_as_good_as_its_worst_repetition_and_failed_requests_are_timeouts_plus_errors() -> None:
+    static = [whole(p99=0.38), whole(p99=0.45, failed=0.002), whole(p99=0.40)]
+    selection = select_tuned(dict([cand("it1", 400, p99=0.44, failed=0.002), cand("it2", 900)]), static)
+    assert (selection.static_p99_s, selection.static_failed_rate) == (0.45, 0.002)
+    assert selection.chosen.name == "it1" and selection.chosen.failed_rate == 0.002
 
 
 def reps(mem: list[float], p99: list[float]) -> list[dict[str, float]]:
@@ -79,14 +93,14 @@ def test_validation_replay_yields_measured_peaks(tmp_path: Path) -> None:
 
 
 def test_a_static_run_with_an_oom_kill_flags_the_sizing(tmp_path: Path) -> None:
-    assert static_sizing_too_low(load_run(scenario(tmp_path / "a"))) == ["OOM kill"]
+    assert static_sizing_too_low(load_run(scenario(tmp_path / "a"))) == "1 OOM kill"
     busy = write_run(
         tmp_path / "b",
         client=[(0.0, 0.1, "ok")],
         sampler=[(float(i), 1.0, 100.0, 0, 0, 0.0) for i in range(30)],
         pods=[pod(0.0, res(1000), res(1000))],
     )
-    assert static_sizing_too_low(load_run(busy)) == []  # CPU at its fixed value says nothing about the memory sizing
+    assert static_sizing_too_low(load_run(busy)) is None  # CPU at its fixed value says nothing about the memory sizing
 
 
 def test_gate_passes_when_memory_moved_both_ways_cpu_never_moved_and_every_lag_is_complete(tmp_path: Path) -> None:
@@ -106,21 +120,45 @@ def test_gate_fails_if_vpa_ever_changes_the_cpu(tmp_path: Path) -> None:
     assert not check.passed and "500" in check.detail
 
 
-def _run_with_unapplied_resize(d: Path, conditions: list[dict[str, str]]) -> Path:
+def test_gate_fails_if_only_the_cpu_limit_in_the_pod_spec_changes(tmp_path: Path) -> None:
+    start = res(1000)
+    changed = pod(22.0, start, start)
+    changed["object"]["spec"]["containers"][0]["resources"]["limits"] = res(1000, cpu_m=750)
+    d = write_run(tmp_path, client=[(1.0, 0.1, "ok")], pods=[pod(0.0, start, start), changed])
+    check = gate_checks(load_run(d))[1]
+    assert not check.passed and "750" in check.detail
+
+
+def _run_with_unapplied_resize(d: Path, conditions: list[dict[str, str]], recommended: bool = True) -> Path:
     """One applied memory increase, then a decrease that never shows up as applied."""
     start, big, low = res(1000), res(2000), res(500)
     return write_run(
         d,
         client=[(1.0, 0.1, "ok")],
         pods=[pod(0.0, start, start), pod(22.0, big, big), pod(60.1, low, big, conditions)],
-        audit=[audit_rec(10.0, big), audit_resize(20.0, big), audit_rec(58.0, low), audit_resize(60.0, low)],
+        audit=([audit_rec(10.0, big)] if recommended else [])
+        + [audit_resize(20.0, big), audit_rec(58.0, low), audit_resize(60.0, low)],
     )
 
 
+REFUSED = [{"type": "PodResizeInProgress", "status": "True", "reason": "Error"}]
+
+
 def test_a_resize_the_kubelet_refused_does_not_fail_the_lag_check(tmp_path: Path) -> None:
-    refused = [{"type": "PodResizeInProgress", "status": "True", "reason": "Error"}]
-    check = gate_checks(load_run(_run_with_unapplied_resize(tmp_path, refused)))[2]
-    assert check.passed and "1 of 1" in check.detail and "Error" in check.detail
+    check = gate_checks(load_run(_run_with_unapplied_resize(tmp_path, REFUSED)))[2]
+    assert check.passed and "2 of 2" in check.detail and "Error" in check.detail
+
+
+def test_a_refused_resize_still_needs_its_recommendation_timestamp(tmp_path: Path) -> None:
+    start, low = res(1000), res(500)
+    d = write_run(  # the only recommendation write in the audit log comes after the patch
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        pods=[pod(0.0, start, start), pod(60.1, low, start, REFUSED)],
+        audit=[audit_resize(60.0, low), audit_rec(70.0, low)],
+    )
+    check = gate_checks(load_run(d))[2]
+    assert not check.passed and "0 of 1" in check.detail
 
 
 def test_a_resize_that_silently_never_applies_still_fails_the_lag_check(tmp_path: Path) -> None:

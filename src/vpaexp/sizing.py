@@ -8,12 +8,22 @@ from typing import Any
 
 import numpy as np
 
-from vpaexp.trace import Floats
+from vpaexp.config import MI
+from vpaexp.trace import K, Floats, Slice
 
-MI = 1024 * 1024
 HEADROOM = 0.15
 TOLERANCE = 0.10
 CAP_FACTOR = 4
+VALIDATION_S = 3600.0
+
+
+@dataclass(frozen=True)
+class PayloadCost:
+    """What one request costs on a pod with ample CPU, and what the idle pod holds."""
+
+    service_s: float
+    request_mem_bytes: float
+    baseline_mem_bytes: float
 
 
 @dataclass(frozen=True)
@@ -24,11 +34,14 @@ class Peaks:
 
 @dataclass(frozen=True)
 class Demand:
-    """Calculated peaks on a pod with ample CPU, and the replay second at which each occurs."""
+    """Calculated peaks on a pod with ample CPU, and the replay second at which they occur.
+
+    Memory is the baseline plus a fixed amount per request in flight, so peak concurrency
+    and peak memory fall at the same moment.
+    """
 
     peaks: Peaks
-    concurrency_at_s: float
-    memory_at_s: float
+    peak_at_s: float
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -54,13 +67,13 @@ class ToleranceExceeded(Exception):
     """Calculation and validation replay disagree by more than the tolerance."""
 
 
-def offline_demand(schedule: Floats, service_s: float, request_mem: float, baseline_mem: float) -> Demand:
+def offline_demand(schedule: Floats, cost: PayloadCost) -> Demand:
     """Demand of the replay on a pod with ample CPU.
 
-    Every request runs for `service_s` and holds `request_mem` while it runs.
+    Every request runs for the payload's service time and holds its memory while it runs.
     """
     starts = np.sort(schedule)
-    ends = starts + service_s
+    ends = starts + cost.service_s
 
     # Requests are served in arrival order with equal service time, so those in flight
     # at any instant are a contiguous index range [ended, started).
@@ -68,10 +81,15 @@ def offline_demand(schedule: Floats, service_s: float, request_mem: float, basel
     i = int(np.argmax(in_flight))
     peak_conc = int(in_flight[i])
     return Demand(
-        peaks=Peaks(peak_conc, baseline_mem + peak_conc * request_mem),
-        concurrency_at_s=float(starts[i]),
-        memory_at_s=float(starts[i]),
+        peaks=Peaks(peak_conc, cost.baseline_mem_bytes + peak_conc * cost.request_mem_bytes),
+        peak_at_s=float(starts[i]),
     )
+
+
+def validation_slice(window: Slice, peak_at_s: float) -> Slice:
+    """The hour of replay centred on the calculated peak, kept inside the window (section 6.1)."""
+    start = min(max(peak_at_s - VALIDATION_S / 2, 0.0), window.replay_duration_s() - VALIDATION_S)
+    return Slice(f"{window.name}-validate", window.trace_start_s + start * K, VALIDATION_S * K)
 
 
 def static_sizing(calc: Peaks, slice_calc: Peaks | None = None, slice_measured: Peaks | None = None) -> Sizing:

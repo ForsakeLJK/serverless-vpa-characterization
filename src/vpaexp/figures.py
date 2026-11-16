@@ -11,9 +11,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from collections.abc import Iterator
+
+from vpaexp.config import MI
 from vpaexp.metrics import Summary, aggregate, allocation_steps, latencies, memory_utilization, oom_kill_times
 from vpaexp.records import Resize, Run
-from vpaexp.sizing import MI
 from vpaexp.trace import Floats
 
 BUCKET_S = 60.0
@@ -23,6 +25,22 @@ OK, TIMEOUT, ERROR, OOM = "#2a9d5c", "#e69f00", "#c0392b", "#d0021b"
 
 def _axis(run: Run) -> tuple[float, str]:
     return (3600.0, "time since replay start (h)") if run.duration_s > 7200 else (60.0, "time since replay start (min)")
+
+
+def _name(run: Run) -> str:
+    return f"{run.setting}, window {run.window}"
+
+
+def _buckets(run: Run) -> Floats:
+    """Edges of the 1-minute buckets, in seconds from replay start."""
+    return np.arange(0, np.ceil(run.duration_s / BUCKET_S) + 1) * BUCKET_S
+
+
+def _by_bucket(t: Floats, values: Floats, edges: Floats) -> Iterator[tuple[int, Floats]]:
+    """(bucket index, the values whose time falls in it), for every bucket that has any."""
+    bucket = np.digitize(t, edges) - 1
+    for b in np.unique(bucket[(bucket >= 0) & (bucket < len(edges) - 1)]):
+        yield int(b), values[bucket == b]
 
 
 def _save(fig: Any, path: Path) -> Path:
@@ -50,7 +68,10 @@ def _mark_oom_kills(ax: Any, run: Run, unit: float) -> None:
 
 
 def fig1_throughput(run: Run, path: Path) -> Path:
-    """Offered load (requests scheduled) and achieved throughput (successful completions), per 1-minute bucket."""
+    """Offered load (requests scheduled) and achieved throughput (successful completions), per 1-minute bucket.
+
+    OOM kills are marked: the gaps between the two lines are the requests lost around them.
+    """
     unit, xlabel = _axis(run)
     edges = _buckets(run)
     c = run.client
@@ -63,7 +84,7 @@ def fig1_throughput(run: Run, path: Path) -> Path:
     _mark_oom_kills(ax, run, unit)
     ax.set_ylim(0, 1.25 * max(float(np.max(offered, initial=1)), float(np.max(achieved, initial=1))) / BUCKET_S)
     ax.set(xlabel=xlabel, ylabel="requests per second (1-min buckets)",
-           title=f"Throughput: {run.meta.get('setting')}, window {run.meta.get('window')}")
+           title=f"Throughput: {_name(run)}")
     ax.legend(fontsize=7, loc="upper right", ncols=3)
     return _save(fig, path)
 
@@ -92,7 +113,7 @@ def fig2_memory(run: Run, path: Path) -> Path:
         ax.fill_between(ts, series("lower"), series("upper"), step="post", color="C1", alpha=0.15, label="lower to upper bound")
         ax.set_ylim(0, 1.3 * max(float(np.max(request)), max(target), float(np.max(usage, initial=0))))
     ax.set(xlabel=xlabel, ylabel="memory (MiB)",
-           title=f"Memory: {run.meta.get('setting')}, window {run.meta.get('window')}")
+           title=f"Memory: {_name(run)}")
     _mark_oom_kills(ax, run, unit)
     ax.legend(fontsize=7, loc="upper right")
     return _save(fig, path)
@@ -104,10 +125,9 @@ def fig3_memory_utilization(run: Run, path: Path) -> Path:
     percent = 100 * memory_utilization(run)
     t = run.samples.t - run.t0
     edges = _buckets(run)
-    bucket = np.digitize(t, edges) - 1
     mean = np.full(len(edges) - 1, np.nan)
-    for b in np.unique(bucket[(bucket >= 0) & (bucket < len(edges) - 1)]):
-        mean[b] = np.mean(percent[bucket == b])
+    for b, values in _by_bucket(t, percent, edges):
+        mean[b] = np.mean(values)
     fig, ax = plt.subplots(figsize=(8, 3.5))
     ax.plot(t / unit, percent, lw=0.4, color="C0", alpha=0.45, label="1s samples")
     ax.step(edges / unit, np.append(mean, mean[-1:]), where="post", lw=1.3, color="C0", label="1-min mean")
@@ -119,13 +139,9 @@ def fig3_memory_utilization(run: Run, path: Path) -> Path:
     # the axis stops at 150% so that those few samples do not flatten everything else.
     ax.set_ylim(0, 150)
     ax.set(xlabel=xlabel, ylabel="memory utilization (% of allocation)",
-           title=f"Memory utilization: {run.meta.get('setting')}, window {run.meta.get('window')} (mean {overall:.0f}%)")
+           title=f"Memory utilization: {_name(run)} (mean {overall:.0f}%)")
     ax.legend(fontsize=7, loc="upper right", ncols=5)
     return _save(fig, path)
-
-
-def _buckets(run: Run) -> Floats:
-    return np.arange(0, np.ceil(run.duration_s / BUCKET_S) + 1) * BUCKET_S
 
 
 def fig4_latency(run: Run, path: Path) -> Path:
@@ -133,10 +149,9 @@ def fig4_latency(run: Run, path: Path) -> Path:
     unit, xlabel = _axis(run)
     when, latency = latencies(run)
     edges = _buckets(run)
-    bucket = np.digitize(when - run.t0, edges) - 1
     quantiles = np.full((3, len(edges) - 1), np.nan)
-    for b in np.unique(bucket[(bucket >= 0) & (bucket < len(edges) - 1)]):
-        quantiles[:, b] = np.percentile(latency[bucket == b], [50, 95, 99])
+    for b, values in _by_bucket(when - run.t0, latency, edges):
+        quantiles[:, b] = np.percentile(values, [50, 95, 99])
     mid = (edges[:-1] + BUCKET_S / 2) / unit
     fig, ax = plt.subplots(figsize=(8, 3.5))
     for values, label, color in zip(quantiles, ("p50", "p95", "p99"), ("C0", "C1", "C3")):
@@ -146,7 +161,7 @@ def fig4_latency(run: Run, path: Path) -> Path:
     _mark_oom_kills(ax, run, unit)
     ax.set_ylim(0, 1.08 * run.timeout_s)
     ax.set(xlabel=xlabel, ylabel="latency (s, 1-min buckets)",
-           title=f"Latency: {run.meta.get('setting')}, window {run.meta.get('window')}")
+           title=f"Latency: {_name(run)}")
     ax.legend(fontsize=7, ncols=3, loc="lower right")
     return _save(fig, path)
 
@@ -168,7 +183,7 @@ def fig5_outcomes(run: Run, path: Path) -> Path:
     _mark_oom_kills(ax, run, unit)
     ax.set_ylim(0, 1.3 * float(np.max(bottom, initial=1.0)))  # headroom for the legend
     ax.set(xlabel=xlabel, ylabel="requests per minute",
-           title=f"Request outcomes: {run.meta.get('setting')}, window {run.meta.get('window')}")
+           title=f"Request outcomes: {_name(run)}")
     ax.legend(fontsize=7, loc="upper right", ncols=4)
     return _save(fig, path)
 
@@ -235,7 +250,7 @@ def run_figures(run: Run, out_dir: Path) -> list[Path]:
         fig6_lag(run, out_dir / "fig6-lag.png"),
     ]
     throughput, memory, utilization, latency, outcomes, lag = panels
-    title = f"{run.meta.get('setting')}, window {run.meta.get('window')}, {run.path.name}"
+    title = f"{_name(run)}, {run.path.name}"
     # On the overview, memory sits beside its utilization.
     rows = [throughput, outcomes, memory, utilization, latency, lag]
     return panels + [overview(rows, out_dir / "overview.png", title)]
