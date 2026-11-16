@@ -127,7 +127,8 @@ class WatchRecorder:
         decoder = json.JSONDecoder()
         while not self._stop.is_set():  # kubectl ends a watch when the server closes it; start again
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-            self._procs.append(proc)
+            with self._lock:
+                self._procs.append(proc)
             assert proc.stdout is not None
             buf = ""
             for line in proc.stdout:
@@ -145,18 +146,22 @@ class WatchRecorder:
 
     def _write(self, record: dict[str, Any]) -> None:
         with self._lock:
-            assert self._out is not None
+            if self._out is None or self._out.closed:
+                return
             self._out.write(json.dumps(record, separators=(",", ":")) + "\n")
             self._out.flush()
 
     def stop(self) -> None:
         self._stop.set()
-        for p in self._procs:
+        with self._lock:
+            procs = list(self._procs)
+        for p in procs:
             p.terminate()
         for t in self._threads:
             t.join(timeout=5)
-        if self._out:
-            self._out.close()
+        with self._lock:
+            if self._out:
+                self._out.close()
 
 
 @dataclass
@@ -194,7 +199,7 @@ class MetricsApiPoller:
 
 
 def extract_audit(cmd: list[str], since_epoch: float, out_path: Path) -> int:
-    """Copy this run's pod-resize and VPA-status events from the API server audit log."""
+    """Copy this run's events from the API server audit log (the policy logs only what the analysis needs)."""
     from vpaexp.records import _audit_time
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
@@ -202,7 +207,7 @@ def extract_audit(cmd: list[str], since_epoch: float, out_path: Path) -> int:
     n = 0
     with open(out_path, "w") as out:
         for line in proc.stdout:
-            if '"resize"' not in line and "verticalpodautoscalers" not in line:
+            if "audit.k8s.io" not in line:
                 continue
             try:
                 event = json.loads(line)

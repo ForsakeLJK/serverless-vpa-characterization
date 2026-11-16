@@ -3,6 +3,7 @@ context = "kubernetes-admin@kubernetes"
 namespace = "vpaexp"
 image = "vpaexp-function:1"
 
+# NodePort. If kube-proxy runs in nftables mode, localhost NodePorts do not work: use the node IP.
 function_url = "http://127.0.0.1:30080/"
 
 audit_log_cmd = ["sudo", "cat", "/var/log/kubernetes/audit/audit.log"]

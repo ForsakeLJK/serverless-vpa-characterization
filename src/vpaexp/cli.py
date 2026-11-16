@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import tomllib
@@ -25,6 +26,7 @@ TRACE = Path("azure-trace/AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt")
 ARRIVALS = Path("data/arrivals.txt.gz")
 VALIDATION_S = 3600.0
 SETTINGS = ("static", "default", "tuned")
+REPETITIONS = 3  # section 10
 
 
 class Experiment:
@@ -97,6 +99,8 @@ def cmd_measure(args: argparse.Namespace) -> None:
     ok = run.client.status == "ok"
     if not ok.all():
         sys.exit(f"{int((~ok).sum())} of {n} requests failed; see {out}")
+    if float(np.max(run.samples.memory_peak_bytes, initial=0.0)) <= 0:
+        sys.exit("the node's kernel does not expose memory.peak (needs Linux 5.19+); per-request memory cannot be measured")
     idle = run.samples.memory_bytes[run.samples.t < run.t0 + lead_in - 1]
     baseline = float(np.median(idle))
     cost = {
@@ -238,7 +242,7 @@ def cmd_figures(args: argparse.Namespace) -> None:
 
 
 def _repetitions(exp: Experiment, window: str, setting: str) -> list[Run]:
-    return [r for r in exp.runs(window, setting) if str(r.meta.get("label", "")).startswith("r") and "smoke" not in str(r.meta.get("label"))]
+    return [r for r in exp.runs(window, setting) if re.fullmatch(r"r\d+", str(r.meta.get("label", "")))]
 
 
 def cmd_report(args: argparse.Namespace) -> None:
@@ -258,7 +262,10 @@ def cmd_report(args: argparse.Namespace) -> None:
     n = 7 if args.window == "A" else 8
     print(figures.fig7_summary(summaries, out / f"fig{n}-summary-{args.window}.png", f"Window {args.window}"))
     print(figures.fig5_latency_cdf([runs[0] for runs in by_setting.values()], out / f"fig5-latency-cdf-{args.window}.png"))
-    if "default" in summaries and "tuned" in summaries:
+    short = [s for s in ("default", "tuned") if len(summaries.get(s, [])) < REPETITIONS]
+    if short:
+        print(f"H1 not evaluated: fewer than {REPETITIONS} repetitions of {' and '.join(short)}")
+    else:
         report["h1"] = decisions.h1([s["whole"] for s in summaries["default"]], [s["whole"] for s in summaries["tuned"]])
         print(f"H1 {'supported' if report['h1']['supported'] else 'rejected'} on window {args.window}")
     for run in by_setting.get("static", []):
@@ -270,16 +277,16 @@ def cmd_report(args: argparse.Namespace) -> None:
 def cmd_tune_select(args: argparse.Namespace) -> None:
     """Section 7 selection rule over the tuning iterations (runs labelled it1, it2, ...)."""
     exp = Experiment(args)
-    static = exp.runs("A", "static")
-    static = [r for r in static if "smoke" not in str(r.meta.get("label"))]
-    iterations = [r for r in exp.runs("A", "tuned") if str(r.meta.get("label", "")).startswith("it")]
+    static = _repetitions(exp, "A", "static")
+    iterations = [r for r in exp.runs("A", "tuned") if re.fullmatch(r"it\d+", str(r.meta.get("label", "")))]
     if not static or not iterations:
         sys.exit("need at least one full static run and one tuning iteration (--setting tuned --label itN) on window A")
     static_p99 = float(np.median([metrics.summarize(r)["whole"]["p99_s"] for r in static]))
     candidates = []
     for r in iterations:
         w = metrics.summarize(r)["whole"]
-        candidates.append(decisions.Candidate(str(r.meta["label"]), w["alloc_cpu_m"], w["alloc_mem_bytes"], w["p99_s"], w["oom_kills"]))
+        candidates.append(decisions.Candidate(str(r.meta["label"]), w["alloc_cpu_m"], w["alloc_mem_bytes"], w["p99_s"],
+                                             w["oom_kills"] + w["container_restarts"]))  # an OOM that kills the container shows as a restart
     chosen, met = decisions.select_tuned(candidates, static_p99, static[0].initial)
     result = {"static_p99_s": static_p99, "candidates": [asdict(c) for c in candidates], "chosen": chosen.name, "constraint_met": met}
     print(json.dumps(result, indent=2))

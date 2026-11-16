@@ -98,5 +98,17 @@ Places where the spec left a choice open; each is one function, easy to change.
 - **Selection rule (§7).** "Lowest mean allocated CPU and memory" is scored as CPU and memory each taken as a fraction of the static allocation, summed (`decisions.select_tuned`).
 - **H1 (§1).** A metric is beaten when the median improves by more than the larger of the two min-to-max spreads. H1 is supported if mean CPU allocation, mean memory allocation or p99 is beaten (`decisions.h1`).
 - **Recommendation timestamp (§8.1).** For a resize, "recommendation updated" is the first VPA status write in the latest unbroken run of writes carrying the value that was patched into the pod (`records._recommended_at`).
+- **Resize applied (§8.1).** A resize counts as applied at the kubelet's first status write that shows the new limits with no resize in progress. The time is taken from the audit log, so all three lag timestamps share the API server's clock; the watch recorder is the fallback.
+- **OOM kills and restarts.** An OOM that kills the whole container shows as a container restart, not in the container's `memory.events`. Restarts are counted per run (`container_restarts`), fail the static sizing check, and disqualify a tuning iteration like an OOM kill.
 - **`minReplicas: 1` on the VPA object.** The updater ignores workloads with fewer replicas than its `--min-replicas` (default 2). The per-object override is set so that it acts on the single pod; no component flag changes.
 - **Latency of failed requests.** Timeouts count at the timeout value (§8.1). Requests with status `error` are excluded from latency and reported in the error rate.
+
+## Not verified, and known gaps
+
+Nothing here has run against a cluster: the unit tests cover the trace, sizing, load generator, configuration and analysis, and the function wrapper was exercised locally with a stub handler. The first prototype run is the test of `cluster.py`, `run.py`, the image build and the setup scripts.
+
+- **VPA 1.7.1 flag and field names** (`confidence-interval-cpu`, `updateMode: InPlace`, the `InPlace` feature gate) are taken from the spec, not checked against the release.
+- **NUMA placement** on the full-run machine relies on systemd `CPUAffinity` for containerd and the kubelet. `setup-fullrun.sh` prints how to check it.
+- **metrics-server and flannel** install from their latest release. The versions used are recorded in each `run.json` but not pinned.
+- **Events** are recorded in `watch.jsonl` but not parsed; failed and deferred resizes are counted from pod conditions.
+- **Existing VPA on the minikube cluster.** If it is not 1.7.1, `install-components.sh` stops. Replacing it (`scripts/setup-prototype.sh --replace-vpa`) deletes every VPA object on the cluster, including `primes-vpa` and `base64-vpa`.

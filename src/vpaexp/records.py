@@ -69,8 +69,9 @@ class Recommendation:
 class Resize:
     """One pod resize patch and what became of it. Times are epoch seconds.
 
-    rec_updated_t and patched_t are on the API server's clock (audit log);
-    applied_t is on the watch recorder's clock.
+    All three are on the API server's clock (audit log): the recommender's status write, the
+    updater's resize patch, and the kubelet's status write showing the new limits. applied_t
+    falls back to the watch recorder's clock if the audit log lacks the kubelet's write.
     """
 
     before: Allocation
@@ -183,7 +184,8 @@ def _pod_state(record: dict[str, Any]) -> PodState:
     return PodState(
         t=record["t"],
         spec=_allocation(_container(obj.get("spec", {}).get("containers")).get("resources", {}).get("requests")),
-        status=_allocation(cs.get("resources", {}).get("requests")),
+        # Limits are what the kubelet has actuated; requests can show the new value before it has.
+        status=_allocation(cs.get("resources", {}).get("limits") or cs.get("resources", {}).get("requests")),
         conditions=tuple(
             (c["type"], c.get("reason", "")) for c in status.get("conditions", []) if c.get("status") == "True"
         ),
@@ -234,6 +236,12 @@ def derive_resizes(initial: Allocation, audit: list[dict[str, Any]], pods: list[
                 rec_updates.append((_audit_time(e), target))
     rec_updates.sort(key=lambda u: u[0])
     patches = sorted((e for e in audit if _audit_matches(e, "pods", "resize")), key=_audit_time)
+    # The kubelet's own status writes: same clock as the patches, and no watch gaps.
+    kubelet = sorted(
+        (_pod_state({"t": _audit_time(e), "object": e.get("responseObject", {})})
+         for e in audit if _audit_matches(e, "pods", "status") and _ok(e)),
+        key=lambda p: p.t,
+    )
 
     out: list[Resize] = []
     current, cursor = initial, 0
@@ -247,20 +255,14 @@ def derive_resizes(initial: Allocation, audit: list[dict[str, Any]], pods: list[
         if after is None or after == current:
             continue
         seen = next((i for i in range(cursor, len(pods)) if pods[i].spec == after), None)
-        applied_t: float | None = None
-        issues: list[str] = []
         if seen is not None:
             cursor = seen
-            for p in pods[seen:]:
-                if p.spec != after:  # the next resize has begun
-                    break
-                if p.status == after:
-                    applied_t = p.t
-                    break
-                for kind, reason in p.conditions:
-                    issue = reason if kind == "PodResizePending" else "Error" if reason == "Error" else None
-                    if kind in ("PodResizePending", "PodResizeInProgress") and issue and issue not in issues:
-                        issues.append(issue)
+        watched = pods[seen:] if seen is not None else []
+        applied_t, issues = _outcome([p for p in kubelet if p.t >= t], after)
+        watch_applied_t, watch_issues = _outcome(watched, after)
+        if applied_t is None:
+            applied_t = watch_applied_t
+        issues += [i for i in watch_issues if i not in issues]
         out.append(
             Resize(
                 before=current,
@@ -274,6 +276,22 @@ def derive_resizes(initial: Allocation, audit: list[dict[str, Any]], pods: list[
         )
         current = after
     return out
+
+
+def _outcome(states: list[PodState], after: Allocation) -> tuple[float | None, list[str]]:
+    """When the pod first shows `after` as applied, and the resize problems reported before then."""
+    issues: list[str] = []
+    for p in states:
+        if p.spec != after:  # the next resize has begun
+            break
+        resizing = any(kind == "PodResizeInProgress" for kind, _ in p.conditions)
+        if p.status == after and not resizing:
+            return p.t, issues
+        for kind, reason in p.conditions:
+            issue = reason if kind == "PodResizePending" else "Error" if reason == "Error" else None
+            if kind in ("PodResizePending", "PodResizeInProgress") and issue and issue not in issues:
+                issues.append(issue)
+    return None, issues
 
 
 def _ok(event: dict[str, Any]) -> bool:

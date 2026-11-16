@@ -65,6 +65,19 @@ def audit_rec(t: float, target: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def audit_status(t: float, spec: dict[str, str], status: dict[str, str],
+                 conditions: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    """The kubelet writing the pod's status."""
+    return {
+        "stage": "ResponseComplete",
+        "verb": "patch",
+        "stageTimestamp": _stamp(t),
+        "objectRef": {"resource": "pods", "subresource": "status", "name": "function-abc"},
+        "responseStatus": {"code": 200},
+        "responseObject": pod(t, spec, status, conditions)["object"],
+    }
+
+
 def audit_resize(t: float, requests: dict[str, str], code: int = 200) -> dict[str, Any]:
     return {
         "stage": "ResponseComplete",

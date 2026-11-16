@@ -90,6 +90,11 @@ def _summarize(run: Run, a: float, b: float) -> Summary:
     out["throttled_periods"] = float(np.sum(s.throttled_periods[m]))
     out["throttled_s"] = float(np.sum(s.throttled_s[m]))
 
+    restarts = [(p.t, p.restarts) for p in run.pods]
+    out["container_restarts"] = float(
+        max((n for t, n in restarts if t < b), default=0) - max((n for t, n in restarts if t < a), default=0)
+    )
+
     here = [r for r in run.resizes if a <= r.patched_t < b]
     applied = [r for r in here if r.outcome == "applied"]
     out["resizes"] = len(applied)
@@ -131,6 +136,8 @@ def static_sizing_too_low(run: Run) -> list[str]:
     problems = []
     if np.sum(run.samples.oom_kills) > 0:
         problems.append("OOM kill")
+    if any(p.restarts for p in run.pods):
+        problems.append("container restart")
     if rolling_cpu_peak(run) >= 0.99 * run.initial.cpu_millicores / 1000:
         problems.append("CPU usage at the limit for a whole 15s window")
     return problems

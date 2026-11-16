@@ -5,7 +5,7 @@ import pytest
 from vpaexp.metrics import summarize
 from vpaexp.records import load_run
 
-from .synthetic import MI, T0, audit_rec, audit_resize, pod, res, scenario, write_run
+from .synthetic import MI, T0, audit_rec, audit_resize, audit_status, pod, res, scenario, write_run
 
 
 def test_latency_counts_timeouts_at_the_timeout_value_and_reports_errors_separately(tmp_path: Path) -> None:
@@ -102,3 +102,53 @@ def test_recommendation_series_is_read_from_the_vpa_watch(tmp_path: Path) -> Non
         (58.0, 500, 400, 700),
     ]
     assert recs[0].upper.memory_bytes == 2000 * MI
+
+
+def test_applied_time_comes_from_the_kubelets_status_write_when_the_audit_log_has_it(tmp_path: Path) -> None:
+    start, big = res(1000, 1000), res(2000, 1000)
+    d = write_run(
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        pods=[pod(0.0, start, start), pod(20.3, big, start), pod(29.0, big, big)],  # the watch saw it late
+        audit=[
+            audit_rec(10.0, big),
+            audit_resize(20.0, big),
+            audit_status(20.5, big, start, [{"type": "PodResizeInProgress", "status": "True"}]),
+            audit_status(21.5, big, big),
+        ],
+    )
+    (resize,) = load_run(d).resizes
+    assert resize.applied_t == T0 + 21.5
+
+
+def test_a_resize_is_not_applied_while_the_kubelet_still_reports_it_in_progress(tmp_path: Path) -> None:
+    start, big = res(1000, 1000), res(2000, 1000)
+    d = write_run(
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        pods=[
+            pod(0.0, start, start),
+            pod(20.1, big, big, [{"type": "PodResizeInProgress", "status": "True"}]),
+            pod(24.0, big, big),
+        ],
+        audit=[audit_rec(10.0, big), audit_resize(20.0, big)],
+    )
+    (resize,) = load_run(d).resizes
+    assert resize.applied_t == T0 + 24.0
+
+
+def test_container_restarts_are_counted_and_flag_a_static_run(tmp_path: Path) -> None:
+    from vpaexp.metrics import static_sizing_too_low
+
+    a = res(1000, 1000)
+    d = write_run(
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        sampler=[(float(i), 0.1, 100.0, 0, 0, 0.0) for i in range(30)],
+        pods=[pod(0.0, a, a), pod(50.0, a, a, restarts=1)],
+    )
+    run = load_run(d)
+    s = summarize(run)
+    assert s["whole"]["container_restarts"] == 1
+    assert s["first_day"]["container_restarts"] == 0 and s["warmed"]["container_restarts"] == 1
+    assert static_sizing_too_low(run) == ["container restart"]

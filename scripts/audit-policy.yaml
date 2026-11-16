@@ -9,6 +9,13 @@ rules:
     resources:
       - group: ""
         resources: ["pods/resize"]
+  # The kubelet's status writes for the experiment's pods: the clock for "resize applied".
+  - level: RequestResponse
+    verbs: ["patch", "update"]
+    namespaces: ["vpaexp"]
+    resources:
+      - group: ""
+        resources: ["pods/status"]
   - level: RequestResponse
     verbs: ["patch", "update"]
     resources:

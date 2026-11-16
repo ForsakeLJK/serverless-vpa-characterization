@@ -19,7 +19,7 @@ minikube start -p "$PROFILE" --driver=vfkit --container-runtime=containerd \
 
 minikube -p "$PROFILE" image build -t vpaexp-function:1 function/
 minikube -p "$PROFILE" addons enable metrics-server
-scripts/install-components.sh "$PROFILE" --skip-metrics-server
+scripts/install-components.sh "$PROFILE" --skip-metrics-server "$@"
 
 echo
 echo "Function URL for cluster/prototype.toml: http://$(minikube -p "$PROFILE" ip):30080/"

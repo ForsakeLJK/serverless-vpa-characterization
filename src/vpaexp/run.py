@@ -157,7 +157,10 @@ def execute(profile: Profile, plan: RunPlan) -> Path:
         if poller:
             poller.stop()
         recorder.stop()
-        (out / "sampler.csv").write_text(kc.run("exec", "sampler", "--", "cat", "/data/sampler.csv", check=False))
+        samples = kc.run("exec", "sampler", "--", "cat", "/data/sampler.csv", check=False)
+        (out / "sampler.csv").write_text(samples)
+        if samples.count("\n") < 3:
+            log("ERROR: the cgroup sampler returned no data; see sampler.log")
         (out / "sampler.log").write_text(kc.run("logs", "sampler", check=False))
         for name, args in (
             ("final-pod.json", ["get", "pods", "-l", f"app={config.APP}", "-o", "json"]),
@@ -173,7 +176,7 @@ def execute(profile: Profile, plan: RunPlan) -> Path:
     restarts = max((p.restarts for p in run.pods), default=0)
     summary["container_restarts"] = restarts
     if restarts:
-        log(f"WARNING: the function container restarted {restarts} time(s); sampler data ends at the first restart")
+        log(f"WARNING: the function container restarted {restarts} time(s); this run breaks the no-restart assumption")
     _write(out / "summary.json", summary)
     return out
 
