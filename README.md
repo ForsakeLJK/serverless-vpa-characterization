@@ -65,6 +65,48 @@ uv run vpaexp --profile full run --setting static  --window A --rep 1
 
 If `size --validate` reports a disagreement above 10%, it exits non-zero and that window needs `size --window X --full-profile` (a 24h profiling replay).
 
+### Arguments
+
+Global options go before the command name (`vpaexp --profile full run ...`).
+
+| Name | Required | Default | When to use | Meaning |
+|---|---|---|---|---|
+| `--profile NAME` | No | `prototype` | Pass `full` on every command on the ARM server. | Testbed profile, read from `cluster/NAME.toml`. Sets the kube context, namespace, image, function URL and sizing limits, and the results subdirectory. |
+| `--results DIR` | No | `results` | To keep a campaign's output apart from earlier results. | Root of the results tree. Output goes to `DIR/<profile>/`. |
+
+`measure` sends a few spaced requests to a generously sized pod and writes `payload-cost.json` (service time and memory per request), which `size` and `run` then use in place of the profile's estimates.
+
+| Name | Required | Default | When to use | Meaning |
+|---|---|---|---|---|
+| `--requests N` | No | `20` | Raise it if the measured service time varies between attempts. | Number of calibration requests, sent a fixed 3s apart so they never overlap. This is a sample size, not a load level: `measure` does not replay the trace. |
+| `--force` | No | off | When re-measuring. | Replace the existing `measure` run directory. Without it, the command refuses to overwrite. |
+
+`size` computes the static allocation and concurrency cap for a window. With no mode flag it prints the offline calculation and saves nothing.
+
+| Name | Required | Default | When to use | Meaning |
+|---|---|---|---|---|
+| `--window A\|B` | Yes | none | Always. Size each window once before its runs. | Which trace window to size: A is the 4 trace days from day offset 2, B the 4 from day offset 9. Each replays in 24h at `k = 4`. |
+| `--validate` | No | off | The normal path for the campaign. | Run the 1h validation replay around the calculated CPU peak, then save the sizing. Exits non-zero if measurement and calculation disagree by more than 10%. |
+| `--full-profile` | No | off | When `--validate` fails, or a static run reports the sizing as too low. | Run a full 24h profiling replay and size from its measured peaks. |
+| `--write-unvalidated` | No | off | Smoke tests only. | Save the calculation alone, with no replay. `run` warns when it uses such a sizing. |
+| `--force` | No | off | When repeating a validation or profiling replay. | Replace the existing validation or profiling run directory. |
+
+`--validate`, `--full-profile` and `--write-unvalidated` are mutually exclusive.
+
+`run` executes one run. It needs a saved sizing for the window.
+
+| Name | Required | Default | When to use | Meaning |
+|---|---|---|---|---|
+| `--setting static\|default\|tuned` | Yes | none | Always. | `static`: no VPA, fixed allocation from `size`. `default`: VPA with its default flags scaled by `k`. `tuned`: VPA with the flags from `--config`. |
+| `--window A\|B` | Yes | none | Always. | The trace window to replay. Request timing comes from the trace's arrival times in that window. |
+| `--rep N` | No | `1` | For the main comparison: 1, 2, 3 for each setting. | Repetition number. Names the run `r<N>`; `report` needs 3 repetitions each of `default` and `tuned` to evaluate H1. |
+| `--config FILE` | Only with `--setting tuned` | none | Every tuned run: tuning iterations and the final tuned repetitions. | A TOML file with a `[flags]` table of declared knobs (see `tuning/example.toml`). Ignored for `static` and `default`. |
+| `--label NAME` | No | `r<rep>` | Tuning iterations: `it1`, `it2`, ... | Run label in place of `r<rep>`. `tune-select` picks up `it<N>` labels, `report` only `r<N>`. |
+| `--limit-s SECONDS` | No | whole window (24h) | Smoke tests, before committing to a 24h run. | Replay only the first `SECONDS` of the window. Appends `-smoke` to the label. |
+| `--force` | No | off | When redoing a run that failed or was invalid. | Replace the run directory if it already exists. Without it, the command refuses to overwrite. |
+
+The run directory is `<window>-<setting>-<label>`, so `--setting default --window A --rep 2` writes `A-default-r2`.
+
 Each run writes a self-describing directory under `results/<profile>/runs/<window>-<setting>-<label>/`:
 
 | File | Content |
