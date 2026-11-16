@@ -196,11 +196,11 @@ Guardrails:
 - **Tuning log**: each iteration records the observation, the knob changed and why, and the result. The log is a paper artifact (figure 9).
 - **Budget**: 3 iterations to start. It may be raised later if the log shows continued improvement.
 - **Selection rule**, fixed before any tuning run. The goal of tuning is to avoid memory waste while keeping service quality.
-  - **Service quality is kept** when both hold: p99 latency is no worse than 1.1× the static p99, and the failed-request rate (timeouts plus errors) is no more than 0.5 percentage points above the static run's. The second condition is needed because errors are not part of the latency percentiles.
+  - **Service quality is kept** when neither p99 latency nor the failed-request rate (timeouts plus errors) is worse than static. The failed-request condition is needed because errors are not part of the latency percentiles. Static's own results vary from run to run, so "no worse than static" means no worse than the worst of the static repetitions on window A available when the rule is applied.
   - **The tuned configuration** is the iteration with the lowest mean allocated memory among those that keep service quality.
   - **OOM kills are expected to be few, not zero.** They do not disqualify an iteration; their cost to users is already limited by the two conditions above. Iterations whose mean allocated memory is within 5% of the lowest count as equal on memory, and among them the one with the fewest OOM kills is chosen.
   - If no iteration keeps service quality, take the one with the fewest failed requests and report that service quality was not kept.
-  - The 0.5 points and the 5% are judgment calls **[verify]**.
+  - The 5% is a judgment call **[verify]**.
 
 An alternative ordering of the stages is recorded in Appendix A as an open question.
 

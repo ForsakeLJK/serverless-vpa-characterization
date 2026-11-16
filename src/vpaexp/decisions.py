@@ -11,8 +11,6 @@ import numpy as np
 from vpaexp.metrics import Summary, summarize
 from vpaexp.records import Run
 
-P99_ALLOWANCE = 1.1
-FAILED_RATE_ALLOWANCE = 0.005  # 0.5 percentage points above static
 MEMORY_TIE = 0.05  # iterations within 5% of the lowest mean memory count as equal
 
 
@@ -30,15 +28,15 @@ class Candidate:
 def select_tuned(candidates: list[Candidate], static_p99_s: float, static_failed_rate: float) -> tuple[Candidate, bool]:
     """Section 7 selection rule: the least memory that keeps service quality.
 
-    Service quality is kept when p99 is within 1.1x static and the failed-request rate is
-    within 0.5 percentage points of static. Among the iterations that keep it, the lowest mean
+    Service quality is kept when neither p99 nor the failed-request rate is worse than static.
+    Among the iterations that keep it, the lowest mean
     allocated memory wins; iterations within 5% of the lowest count as equal on memory, and
     the one with the fewest OOM kills is taken. Returns the choice and whether any iteration
     kept service quality; if none did, the one with the fewest failed requests is returned.
     """
     eligible = [
         c for c in candidates
-        if c.p99_s <= P99_ALLOWANCE * static_p99_s and c.failed_rate <= static_failed_rate + FAILED_RATE_ALLOWANCE
+        if c.p99_s <= static_p99_s and c.failed_rate <= static_failed_rate
     ]
     if not eligible:
         return min(candidates, key=lambda c: (c.failed_rate, c.p99_s)), False

@@ -296,18 +296,20 @@ def cmd_tune_select(args: argparse.Namespace) -> None:
     if not static or not iterations:
         sys.exit("need at least one full static run and one tuning iteration (--setting tuned --label itN) on window A")
     static_whole = [metrics.summarize(r)["whole"] for r in static]
-    static_p99 = float(np.median([w["p99_s"] for w in static_whole]))
-    static_failed = float(np.median([w["timeout_rate"] + w["error_rate"] for w in static_whole]))
+    # "No worse than static" is judged against the worst static repetition, so that the
+    # run-to-run spread of static itself does not reject an iteration.
+    static_p99 = max(w["p99_s"] for w in static_whole)
+    static_failed = max(w["timeout_rate"] + w["error_rate"] for w in static_whole)
     candidates = []
     for r in iterations:
         w = metrics.summarize(r)["whole"]
         candidates.append(decisions.Candidate(str(r.meta["label"]), w["alloc_mem_bytes"], w["p99_s"],
                                              w["timeout_rate"] + w["error_rate"], w["oom_kills"]))
     chosen, met = decisions.select_tuned(candidates, static_p99, static_failed)
-    result = {"static_p99_s": static_p99, "static_failed_rate": static_failed, "candidates": [asdict(c) for c in candidates], "chosen": chosen.name, "constraint_met": met}
+    result = {"static_p99_s": static_p99, "static_failed_rate": static_failed, "static_runs": len(static), "candidates": [asdict(c) for c in candidates], "chosen": chosen.name, "constraint_met": met}
     print(json.dumps(result, indent=2))
     if not met:
-        print("SERVICE QUALITY NOT KEPT by any iteration (p99 within 1.1x static, failed requests within 0.5 points of static); "
+        print("SERVICE QUALITY NOT KEPT by any iteration (p99 and failed-request rate no worse than static); "
               "the one with the fewest failed requests was chosen. Report this.")
     _write(exp.root / "report" / "tuning-selection.json", result)
 

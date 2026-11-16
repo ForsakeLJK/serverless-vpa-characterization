@@ -19,9 +19,9 @@ def pick(candidates: list[Candidate], static_failed: float = 0.0) -> tuple[str, 
 
 def test_tuned_is_the_iteration_with_the_least_memory_that_keeps_service_quality() -> None:
     assert pick([
-        cand("it1", 300, p99=0.50),  # least memory, but p99 above 1.1 x 0.4
-        cand("it2", 350, failed=0.02),  # too many failed requests
-        cand("it3", 400, p99=0.44),
+        cand("it1", 300, p99=0.41),  # least memory, but p99 worse than static's 0.40
+        cand("it2", 350, failed=0.001),  # more failed requests than static
+        cand("it3", 400, p99=0.38),
         cand("it4", 600),
     ]) == ("it3", True)
 
@@ -30,9 +30,9 @@ def test_oom_kills_do_not_disqualify_an_iteration_that_keeps_service_quality() -
     assert pick([cand("it1", 400, ooms=3), cand("it2", 900)]) == ("it1", True)
 
 
-def test_failed_requests_are_judged_against_the_static_run_with_half_a_point_of_allowance() -> None:
-    assert pick([cand("it1", 400, failed=0.014), cand("it2", 900)], static_failed=0.01) == ("it1", True)
-    assert pick([cand("it1", 400, failed=0.016), cand("it2", 900)], static_failed=0.01) == ("it2", True)
+def test_failed_requests_may_equal_but_not_exceed_the_static_rate() -> None:
+    assert pick([cand("it1", 400, failed=0.010), cand("it2", 900)], static_failed=0.01) == ("it1", True)
+    assert pick([cand("it1", 400, failed=0.011), cand("it2", 900)], static_failed=0.01) == ("it2", True)
 
 
 def test_among_iterations_within_5_percent_on_memory_the_fewest_oom_kills_wins() -> None:
