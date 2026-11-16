@@ -1,0 +1,224 @@
+"""Settings: VPA component flags and the Kubernetes objects of a run (spec sections 3, 6, 7)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+MI = 1024 * 1024
+APP = "function"
+FUNCTION_PORT = 8080
+HEALTH_PORT = 8081
+NODE_PORT = 30080
+
+# Upstream defaults. Durations in seconds; these are divided by k.
+_RECOMMENDER_DURATIONS = {
+    "cpu-histogram-decay-half-life": 24 * 3600,
+    "memory-histogram-decay-half-life": 24 * 3600,
+    "memory-aggregation-interval": 24 * 3600,
+    "confidence-interval-cpu": 24 * 3600,
+    "confidence-interval-memory": 24 * 3600,
+    "recommender-interval": 60,
+}
+_RECOMMENDER_VALUES = {
+    "memory-aggregation-interval-count": "8",
+    "target-cpu-percentile": "0.9",
+    "target-memory-percentile": "0.9",
+    "recommendation-margin-fraction": "0.15",
+    "pod-recommendation-min-cpu-millicores": "25",
+    "pod-recommendation-min-memory-mb": "250",
+}
+_UPDATER_DURATIONS = {
+    "in-recommendation-bounds-eviction-lifetime-threshold": 12 * 3600,
+    "evict-after-oom-threshold": 600,
+    "updater-interval": 60,
+}
+_UPDATER_VALUES = {"pod-update-threshold": "0.1"}
+
+# Section 7: the only flags hand-tuning may change.
+DECLARED_KNOBS = frozenset(
+    {
+        "cpu-histogram-decay-half-life",
+        "memory-histogram-decay-half-life",
+        "memory-aggregation-interval",
+        "confidence-interval-cpu",
+        "confidence-interval-memory",
+        "target-cpu-percentile",
+        "target-memory-percentile",
+        "recommendation-margin-fraction",
+        "pod-recommendation-min-cpu-millicores",
+        "pod-recommendation-min-memory-mb",
+        "in-recommendation-bounds-eviction-lifetime-threshold",
+        "pod-update-threshold",
+    }
+)
+
+# Section 11: windows far below the k=4 values so that resizes occur within 30 minutes.
+# Not subject to the declared-knob rule; the prototype only verifies the pipeline.
+PROTOTYPE_FLAGS = {
+    "cpu-histogram-decay-half-life": "2m0s",
+    "memory-histogram-decay-half-life": "2m0s",
+    "memory-aggregation-interval": "2m0s",
+    "confidence-interval-cpu": "2m0s",
+    "confidence-interval-memory": "2m0s",
+    "in-recommendation-bounds-eviction-lifetime-threshold": "1m0s",
+    "evict-after-oom-threshold": "30s",
+}
+
+
+class UndeclaredKnob(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class VpaFlags:
+    recommender: dict[str, str]
+    updater: dict[str, str]
+
+
+@dataclass(frozen=True)
+class Allocation:
+    cpu_millicores: int
+    memory_bytes: int
+
+    def resources(self) -> dict[str, str]:
+        return {"cpu": f"{self.cpu_millicores}m", "memory": f"{self.memory_bytes // MI}Mi"}
+
+
+def go_duration(seconds: float) -> str:
+    """Format like Go's time.Duration.String(), e.g. 6h0m0s, 2m30s, 15s."""
+    if seconds != int(seconds):
+        raise ValueError(f"{seconds}s is not a whole number of seconds")
+    h, rest = divmod(int(seconds), 3600)
+    m, s = divmod(rest, 60)
+    if h:
+        return f"{h}h{m}m{s}s"
+    return f"{m}m{s}s" if m else f"{s}s"
+
+
+def vpa_flags(k: int, overrides: dict[str, str] | None = None, *, restrict_to_declared: bool = True) -> VpaFlags:
+    """Upstream defaults with every time-based setting divided by k, then the overrides."""
+    recommender = {f: go_duration(v / k) for f, v in _RECOMMENDER_DURATIONS.items()} | _RECOMMENDER_VALUES
+    updater = {f: go_duration(v / k) for f, v in _UPDATER_DURATIONS.items()} | _UPDATER_VALUES
+    for knob, value in (overrides or {}).items():
+        if restrict_to_declared and knob not in DECLARED_KNOBS:
+            raise UndeclaredKnob(f"{knob} is not in the declared knob set (spec section 7)")
+        target = recommender if knob in recommender else updater
+        if knob not in target:
+            raise UndeclaredKnob(f"{knob} is not a known flag")
+        target[knob] = value
+    return VpaFlags(recommender, updater)
+
+
+_BASE_ARGS = ["--v=4", "--stderrthreshold=info"]
+
+
+def recommender_args(flags: VpaFlags) -> list[str]:
+    return _BASE_ARGS + [f"--{f}={v}" for f, v in sorted(flags.recommender.items())]
+
+
+def updater_args(flags: VpaFlags) -> list[str]:
+    return _BASE_ARGS + ["--feature-gates=InPlace=true"] + [f"--{f}={v}" for f, v in sorted(flags.updater.items())]
+
+
+def deployment_manifest(namespace: str, image: str, allocation: Allocation, concurrency_cap: int) -> dict[str, Any]:
+    labels = {"app": APP}
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": APP, "namespace": namespace, "labels": labels},
+        "spec": {
+            "replicas": 1,
+            "strategy": {"type": "Recreate"},
+            "selector": {"matchLabels": labels},
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {
+                    "terminationGracePeriodSeconds": 5,
+                    "containers": [
+                        {
+                            "name": APP,
+                            "image": image,
+                            "imagePullPolicy": "IfNotPresent",
+                            "ports": [{"containerPort": FUNCTION_PORT}, {"containerPort": HEALTH_PORT}],
+                            "env": [{"name": "CONCURRENCY_CAP", "value": str(concurrency_cap)}],
+                            "resources": {"requests": allocation.resources(), "limits": allocation.resources()},
+                            "resizePolicy": [
+                                {"resourceName": "cpu", "restartPolicy": "NotRequired"},
+                                {"resourceName": "memory", "restartPolicy": "NotRequired"},
+                            ],
+                            "readinessProbe": {"httpGet": {"path": "/", "port": HEALTH_PORT}, "periodSeconds": 2},
+                        }
+                    ],
+                },
+            },
+        },
+    }
+
+
+def service_manifest(namespace: str) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": APP, "namespace": namespace},
+        "spec": {
+            "type": "NodePort",
+            "selector": {"app": APP},
+            "ports": [{"port": FUNCTION_PORT, "targetPort": FUNCTION_PORT, "nodePort": NODE_PORT}],
+        },
+    }
+
+
+def vpa_manifest(namespace: str, max_allowed: Allocation) -> dict[str, Any]:
+    return {
+        "apiVersion": "autoscaling.k8s.io/v1",
+        "kind": "VerticalPodAutoscaler",
+        "metadata": {"name": APP, "namespace": namespace},
+        "spec": {
+            "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": APP},
+            # minReplicas: the updater skips workloads below its --min-replicas (default 2);
+            # the per-object override lets it act on the single function pod.
+            "updatePolicy": {"updateMode": "InPlace", "minReplicas": 1},
+            "resourcePolicy": {
+                "containerPolicies": [
+                    {
+                        "containerName": APP,
+                        "controlledResources": ["cpu", "memory"],
+                        "controlledValues": "RequestsAndLimits",
+                        "maxAllowed": max_allowed.resources(),
+                    }
+                ]
+            },
+        },
+    }
+
+
+def sampler_manifest(namespace: str, image: str, container_id: str) -> dict[str, Any]:
+    """The cgroup sampler: a pod on the node that reads the function container's cgroup files."""
+    return {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "sampler", "namespace": namespace, "labels": {"app": "sampler"}},
+        "spec": {
+            "restartPolicy": "Never",
+            "terminationGracePeriodSeconds": 2,
+            "containers": [
+                {
+                    "name": "sampler",
+                    "image": image,
+                    "imagePullPolicy": "IfNotPresent",
+                    "command": ["python", "/app/sampler.py", "--cgroup-root", "/host-cgroup",
+                                "--container-id", container_id, "--out", "/data/sampler.csv"],
+                    "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}},
+                    "volumeMounts": [
+                        {"name": "cgroup", "mountPath": "/host-cgroup", "readOnly": True},
+                        {"name": "data", "mountPath": "/data"},
+                    ],
+                }
+            ],
+            "volumes": [
+                {"name": "cgroup", "hostPath": {"path": "/sys/fs/cgroup"}},
+                {"name": "data", "emptyDir": {}},
+            ],
+        },
+    }

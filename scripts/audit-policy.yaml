@@ -1,0 +1,17 @@
+# API server audit policy. The audit log is the authoritative clock for
+# "recommendation updated" and "pod patched" (spec section 8.2). Everything else is dropped.
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages: ["RequestReceived"]
+rules:
+  - level: RequestResponse
+    verbs: ["patch", "update"]
+    resources:
+      - group: ""
+        resources: ["pods/resize"]
+  - level: RequestResponse
+    verbs: ["patch", "update"]
+    resources:
+      - group: "autoscaling.k8s.io"
+        resources: ["verticalpodautoscalers", "verticalpodautoscalers/status"]
+  - level: None

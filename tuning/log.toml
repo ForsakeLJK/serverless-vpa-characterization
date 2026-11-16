@@ -1,0 +1,9 @@
+# Tuning log (spec section 7, figure 9). One [[iteration]] per tuning run on window A.
+# Each iteration's flags live in tuning/<name>.toml and are run with:
+#   vpaexp --profile full run --setting tuned --window A --label <name> --config tuning/<name>.toml
+#
+# [[iteration]]
+# name = "it1"
+# observation = "what the previous run got wrong"
+# knob = "flag=value, and why"
+# result = "what changed"

@@ -1,0 +1,34 @@
+[project]
+name = "vpaexp"
+version = "0.1.0"
+description = "Kubernetes VPA (InPlace) under a serverless workload: experiment harness"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.9",
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+vpaexp = "vpaexp.cli:main"
+
+[dependency-groups]
+dev = ["mypy>=1.10", "pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vpaexp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+files = ["src", "tests"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["matplotlib.*"]
+ignore_missing_imports = true
