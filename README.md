@@ -147,9 +147,9 @@ Places where the spec left a choice open; each is one function, easy to change.
 
 ## Not verified, and known gaps
 
-Nothing here has run against a cluster: the unit tests cover the trace, sizing, load generator, configuration and analysis, and the function wrapper was exercised locally with a stub handler. The first prototype run is the test of `cluster.py`, `run.py`, the image build and the setup scripts.
+The prototype run on the minikube cluster passed the gate (§11), which exercised `cluster.py`, `run.py`, the image build, the collectors and the figures end to end. `scripts/setup-fullrun.sh` and the `full` profile have not been run.
 
-- **VPA 1.7.1 flag and field names** (`confidence-interval-cpu`, `updateMode: InPlace`, the `InPlace` feature gate) are taken from the spec, not checked against the release.
+- **VPA 1.7.1 flag and field names** were accepted by the 1.7.1 recommender and updater in the prototype run.
 - **NUMA placement** on the full-run machine relies on systemd `CPUAffinity` for containerd and the kubelet. `setup-fullrun.sh` prints how to check it.
 - **metrics-server and flannel** install from their latest release. The versions used are recorded in each `run.json` but not pinned.
 - **Events** are recorded in `watch.jsonl` but not parsed; failed and deferred resizes are counted from pod conditions.
