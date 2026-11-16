@@ -53,7 +53,7 @@ Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on 
 - **Deviations from how SeBS functions normally run**, both documented in the paper:
   - **Concurrency inside one pod**: on a FaaS platform each instance serves one request at a time. Here the wrapper runs one process per request, so the arrival rate drives both CPU and memory within the single pod.
   - **Warm invocations only**: each request's process is forked from a parent that has already imported igraph. Cold starts are out of scope.
-- **Concurrency cap**: 4× the peak concurrency observed in the profiling run for that window, fixed for all settings on that window. Requests beyond the cap queue in the server. The cap stops a throttled pod from forking without bound; the factor 4 is a judgment call, not a derived value **[verify]**.
+- **Concurrency cap**: 4× the peak concurrency from the sizing step for that window (section 6.1), fixed for all settings on that window. Requests beyond the cap queue in the server. The cap stops a throttled pod from forking without bound; the factor 4 is a judgment call, not a derived value **[verify]**.
 - **Resources**: requests equal limits for CPU and memory (Guaranteed QoS), so every allocation change alters what the function can use.
 - **Resize policy**: `NotRequired` for CPU and memory. No resize may restart the container.
 
@@ -114,11 +114,29 @@ All three settings use the same window, the same payload, and the same initial a
 
 ### 6.1 Static (no VPA)
 
-- A profiling run replays the window for 24h with generous fixed limits and no VPA.
+Static is sized for the window's peak demand, found by an offline calculation that a short replay then validates. This replaces a full 24h profiling replay per window.
+
+**Offline calculation.** The workload is deterministic: every request does identical work, and on a generously sized pod requests do not slow each other down. Unthrottled demand over the whole window is therefore computed from the trace's arrival times and the per-request service time and memory measured on the full-run machine. The calculation yields, for each window:
+
+- the peak concurrency (most requests in flight at one instant);
+- the highest CPU usage in any 15s window;
+- the highest memory usage;
+- the moment at which each of these occurs.
+
+**Validation replay.** The calculation does not model allocator overhead or the cost of forking, so it is checked against the real system. For each window, a 1h replay centred on the calculated peak runs with generous fixed limits and no VPA.
+
+- The measured peak concurrency, peak 15s CPU and peak memory must each agree with the calculation within 10%.
+- If any does not, that window falls back to a full 24h profiling replay.
+
+**Sizing rule.**
+
 - Static CPU = the highest CPU usage in any 15s window, plus 15%.
-- Static memory = the highest memory usage observed, plus 15%.
+- Static memory = the highest memory usage, plus 15%.
+- Where calculation and validation replay differ within the tolerance, the larger value is used.
 - Computed separately for windows A and B.
-- The profiling run also yields the peak concurrency used for the concurrency cap.
+- The same step yields the peak concurrency used for the concurrency cap.
+
+**Check during the campaign.** If a static run shows an OOM kill, or CPU usage at the limit for a whole 15s window, the sizing was too low; it is redone with a full profiling replay and the affected runs are repeated.
 
 ### 6.2 VPA default
 
@@ -221,13 +239,13 @@ Repetition rule: every setting that appears in a results figure gets 3 repetitio
 
 | Stage | Runs | Time |
 |---|---|---|
-| Profiling, windows A and B | 2 | 48h |
+| Sizing: offline calculation plus a 1h validation replay per window | 2 short | 2h |
 | Tuning iterations on window A | 3 | 72h |
 | Main comparison on A (3 settings × 3 repetitions) | 9 | 216h |
 | Transfer on B (3 settings × 3 repetitions) | 9 | 216h |
-| **Total** | **23** | **552h, about 23 days** |
+| **Total** | **21 full runs, 2 short** | **506h, about 21 days** |
 
-Per-run reset and collection overhead is extra and not yet measured. The first default run on A doubles as the starting observation for tuning.
+Per-run reset and collection overhead is extra and not yet measured. A window whose validation replay fails the 10% tolerance adds a 24h profiling replay. The first default run on A doubles as the starting observation for tuning.
 
 ## 11. Prototype gate
 
@@ -258,7 +276,7 @@ One 30-minute run on the Mac minikube cluster. The prototype only verifies the p
 - **Metrics refresh at 15s**: prototype gate check 4.
 - **System reserve** for `maxAllowed`: value not yet chosen.
 - **Four-day minimum for memory release**: derived by hand from the decaying-histogram rule (section 14), not checked against the 1.7.1 code. It can be verified offline with synthetic daily peaks.
-- **Peak placement**: the derivation assumes the highest memory peak falls on the window's first day. That holds for window A by peak-minute rate but not for window B, whose busiest day is the third. The profiling runs must confirm where the memory peaks actually fall.
+- **Peak placement**: the derivation assumes the highest memory peak falls on the window's first day. That holds for window A by peak-minute rate but not for window B, whose busiest day is the third. The sizing step (section 6.1) must confirm where the memory peaks actually fall.
 - **Memory window enforcement**: the docs define the window as 8 intervals with one peak each, but no code was found that removes peaks older than that. Read the checkpoint and aggregate-state code before making claims about the window in the paper.
 - **Design-history citations** for the motivation in section 1.
 - **Per-run overhead**: not measured.
