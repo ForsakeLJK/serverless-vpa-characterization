@@ -9,7 +9,7 @@ from .synthetic import scenario, write_run
 
 def test_figures_1_to_6_render_from_a_collected_run(tmp_path: Path) -> None:
     run = load_run(scenario(tmp_path / "run"))
-    paths = run_figures(run, tmp_path / "figs", compare=[run])
+    paths = run_figures(run, tmp_path / "figs")
     assert len(paths) == 6
     assert all(p.stat().st_size > 5_000 for p in paths)
 

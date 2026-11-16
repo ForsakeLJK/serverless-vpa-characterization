@@ -237,7 +237,7 @@ def cmd_gate(args: argparse.Namespace) -> None:
 
 def cmd_figures(args: argparse.Namespace) -> None:
     run = load_run(Path(args.run_dir))
-    for p in figures.run_figures(run, Path(args.run_dir) / "figures", [load_run(Path(d)) for d in args.compare]):
+    for p in figures.run_figures(run, Path(args.run_dir) / "figures"):
         print(p)
 
 
@@ -246,7 +246,7 @@ def _repetitions(exp: Experiment, window: str, setting: str) -> list[Run]:
 
 
 def cmd_report(args: argparse.Namespace) -> None:
-    """Figures 5, 7 (window A) or 8 (window B), the H1 verdict, and the static sizing check."""
+    """Figure 7 (window A) or 8 (window B), the H1 verdict, and the static sizing check."""
     exp = Experiment(args)
     by_setting = {s: _repetitions(exp, args.window, s) for s in SETTINGS}
     by_setting = {s: runs for s, runs in by_setting.items() if runs}
@@ -261,7 +261,6 @@ def cmd_report(args: argparse.Namespace) -> None:
     }
     n = 7 if args.window == "A" else 8
     print(figures.fig7_summary(summaries, out / f"fig{n}-summary-{args.window}.png", f"Window {args.window}"))
-    print(figures.fig5_latency_cdf([runs[0] for runs in by_setting.values()], out / f"fig5-latency-cdf-{args.window}.png"))
     short = [s for s in ("default", "tuned") if len(summaries.get(s, [])) < REPETITIONS]
     if short:
         print(f"H1 not evaluated: fewer than {REPETITIONS} repetitions of {' and '.join(short)}")
@@ -342,9 +341,8 @@ def main() -> None:
 
     c = command("figures", cmd_figures, "render figures 1-6 for a run directory")
     c.add_argument("run_dir")
-    c.add_argument("--compare", nargs="*", default=[], help="other runs to overlay in the latency CDF")
 
-    c = command("report", cmd_report, "summary figure (7 or 8), latency CDF and H1 for a window")
+    c = command("report", cmd_report, "summary figure (7 or 8) and H1 for a window")
     c.add_argument("--window", choices=sorted(WINDOWS), required=True)
 
     command("tune-select", cmd_tune_select, "apply the selection rule to the tuning iterations")

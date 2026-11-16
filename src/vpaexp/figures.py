@@ -11,11 +11,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from vpaexp.metrics import Summary, aggregate, allocation_steps, latencies
-from vpaexp.records import Recommendation, Run
+from vpaexp.metrics import Summary, aggregate, allocation_steps, latencies, oom_kill_times
+from vpaexp.records import Recommendation, Resize, Run
 from vpaexp.sizing import MI
+from vpaexp.trace import Floats
 
 BUCKET_S = 60.0
+DPI = 300
+OK, TIMEOUT, ERROR, OOM = "#2a9d5c", "#e69f00", "#c0392b", "#d0021b"
 
 
 def _axis(run: Run) -> tuple[float, str]:
@@ -25,7 +28,7 @@ def _axis(run: Run) -> tuple[float, str]:
 def _save(fig: Any, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=DPI)
     plt.close(fig)
     return path
 
@@ -33,6 +36,17 @@ def _save(fig: Any, path: Path) -> Path:
 def _mark_resizes(ax: Any, run: Run, unit: float) -> None:
     for i, r in enumerate(x for x in run.resizes if x.outcome == "applied"):
         ax.axvline((r.patched_t - run.t0) / unit, color="0.6", lw=0.6, ls=":", label="resize" if i == 0 else None)
+
+
+def _mark_oom_kills(ax: Any, run: Run, unit: float) -> None:
+    """A red line down the plot and a marker on its top edge for every OOM kill."""
+    xs = (oom_kill_times(run) - run.t0) / unit
+    if not len(xs):
+        return
+    for x in xs:
+        ax.axvline(x, color=OOM, lw=0.7, alpha=0.45)
+    ax.plot(xs, np.ones(len(xs)), "v", color=OOM, ms=5, ls="none", clip_on=False, zorder=5,
+            transform=ax.get_xaxis_transform(), label=f"OOM kill ({len(xs)})")
 
 
 def fig1_arrival_rate(run: Run, path: Path) -> Path:
@@ -74,6 +88,7 @@ def _resource_figure(run: Run, path: Path, resource: str) -> Path:
         ax.set_ylim(0, 1.3 * max(float(np.max(request)), float(np.max(target)), float(np.max(usage, initial=0))))
     ax.set(xlabel=xlabel, ylabel="CPU (cores)" if cpu else "memory (MiB)",
            title=f"{'CPU' if cpu else 'Memory'}: {run.meta.get('setting')}, window {run.meta.get('window')}")
+    _mark_oom_kills(ax, run, unit)
     ax.legend(fontsize=7, loc="upper right")
     return _save(fig, path)
 
@@ -86,59 +101,100 @@ def fig3_memory(run: Run, path: Path) -> Path:
     return _resource_figure(run, path, "memory")
 
 
+def _buckets(run: Run) -> Floats:
+    return np.arange(0, np.ceil(run.duration_s / BUCKET_S) + 1) * BUCKET_S
+
+
 def fig4_latency(run: Run, path: Path) -> Path:
+    """p50, p95 and p99 latency per 1-minute bucket, as lines; a bucket with no requests breaks the line."""
     unit, xlabel = _axis(run)
     when, latency = latencies(run)
-    bucket = ((when - run.t0) // BUCKET_S).astype(int)
-    xs, p50, p99 = [], [], []
-    for b in np.unique(bucket):
-        values = latency[bucket == b]
-        xs.append(b * BUCKET_S / unit)
-        p50.append(np.percentile(values, 50))
-        p99.append(np.percentile(values, 99))
+    edges = _buckets(run)
+    bucket = np.digitize(when - run.t0, edges) - 1
+    quantiles = np.full((3, len(edges) - 1), np.nan)
+    for b in np.unique(bucket[(bucket >= 0) & (bucket < len(edges) - 1)]):
+        quantiles[:, b] = np.percentile(latency[bucket == b], [50, 95, 99])
+    mid = (edges[:-1] + BUCKET_S / 2) / unit
     fig, ax = plt.subplots(figsize=(8, 3.5))
-    ax.plot(xs, p99, ".", ms=2, color="C3", label="p99")
-    ax.plot(xs, p50, ".", ms=2, color="C0", label="p50")
+    for values, label, color in zip(quantiles, ("p50", "p95", "p99"), ("C0", "C1", "C3")):
+        ax.plot(mid, values, lw=1.1, color=color, label=label)
+    ax.axhline(run.timeout_s, color="0.4", lw=0.7, ls="--", label="timeout")
     _mark_resizes(ax, run, unit)
-    ax.set(xlabel=xlabel, ylabel="latency (s, 1-min buckets)", yscale="log",
+    _mark_oom_kills(ax, run, unit)
+    ax.set_ylim(0, 1.08 * run.timeout_s)
+    ax.set(xlabel=xlabel, ylabel="latency (s, 1-min buckets)",
            title=f"Latency: {run.meta.get('setting')}, window {run.meta.get('window')}")
-    ax.legend(fontsize=7)
+    ax.legend(fontsize=7, ncols=3, loc="lower right")
     return _save(fig, path)
 
 
-def fig5_latency_cdf(runs: list[Run], path: Path) -> Path:
-    fig, ax = plt.subplots(figsize=(5, 3.5))
-    for run in runs:
-        _, latency = latencies(run)
-        ordered = np.sort(latency)
-        ax.plot(ordered, np.arange(1, len(ordered) + 1) / max(len(ordered), 1), label=str(run.meta.get("setting")))
-    ax.set(xlabel="latency (s)", ylabel="fraction of requests", xscale="log", title="Latency CDF")
-    ax.legend(fontsize=7)
+def fig5_outcomes(run: Run, path: Path) -> Path:
+    """Requests per 1-minute bucket by outcome (ok, timeout, error), stacked, by scheduled time."""
+    unit, xlabel = _axis(run)
+    edges = _buckets(run)
+    status = run.client.status
+    total = max(len(status), 1)
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    bottom = np.zeros(len(edges) - 1)
+    for name, color in (("ok", OK), ("timeout", TIMEOUT), ("error", ERROR)):
+        counts, _ = np.histogram(run.client.scheduled[status == name] - run.t0, edges)
+        n = int(np.sum(status == name))
+        ax.bar(edges[:-1] / unit, counts, width=BUCKET_S / unit, bottom=bottom, align="edge", color=color,
+               linewidth=0, label=f"{name}: {n:,} ({100 * n / total:.1f}%)")
+        bottom += counts
+    _mark_oom_kills(ax, run, unit)
+    ax.set_ylim(0, 1.3 * float(np.max(bottom, initial=1.0)))  # headroom for the legend
+    ax.set(xlabel=xlabel, ylabel="requests per minute",
+           title=f"Request outcomes: {run.meta.get('setting')}, window {run.meta.get('window')}")
+    ax.legend(fontsize=7, loc="upper right", ncols=4)
     return _save(fig, path)
+
+
+def _resize_label(i: int, r: Resize) -> str:
+    def arrow(before: int, after: int) -> str:
+        return "\u2191" if after > before else "\u2193" if after < before else ""
+
+    cpu = arrow(r.before.cpu_millicores, r.after.cpu_millicores)
+    mem = arrow(r.before.memory_bytes, r.after.memory_bytes)
+    return f"{i}\n" + " ".join(part for part in (f"cpu{cpu}" if cpu else "", f"mem{mem}" if mem else "") if part)
 
 
 def fig6_lag(run: Run, path: Path) -> Path:
-    done = [r for r in run.resizes if r.complete]
-    to_patch = [r.patched_t - (r.rec_updated_t or r.patched_t) for r in done]
-    to_apply = [(r.applied_t or r.patched_t) - r.patched_t for r in done]
+    """Actuation lag of every applied resize as a stacked bar of its two stages.
+
+    The kubelet stage is usually a few hundred times shorter than the first, so it is also
+    written above each bar in milliseconds.
+    """
+    done = [(i, r) for i, r in enumerate(run.resizes, 1) if r.complete]
+    to_patch = np.array([r.patched_t - (r.rec_updated_t or r.patched_t) for _, r in done])
+    to_apply = np.array([(r.applied_t or r.patched_t) - r.patched_t for _, r in done])
     xs = np.arange(len(done))
-    fig, ax = plt.subplots(figsize=(8, 3.5))
-    ax.bar(xs, to_patch, label="recommendation updated to pod patched")
-    ax.bar(xs, to_apply, bottom=to_patch, label="pod patched to kubelet applied")
-    ax.set_xticks(xs, [str(i + 1) for i in xs])
-    ax.set(xlabel="resize (in order)", ylabel="lag (s)", title=f"Actuation lag, {len(done)} resizes")
-    ax.legend(fontsize=7)
+    fig, ax = plt.subplots(figsize=(max(8.0, 0.55 * len(done) + 2), 4))
+    ax.bar(xs, to_patch, 0.7, color="C0", label="recommendation updated \u2192 pod patched")
+    ax.bar(xs, to_apply, 0.7, bottom=to_patch, color="C1", label="pod patched \u2192 kubelet applied")
+    top = float(np.max(to_patch + to_apply, initial=1.0))
+    for x, a, b in zip(xs, to_patch, to_apply):
+        if a > 0.12 * top:
+            ax.text(float(x), a / 2, f"{a:.1f} s", ha="center", va="center", fontsize=6.5, color="white", rotation=90)
+        ax.text(float(x), a + b + 0.015 * top, f"{b * 1000:.0f} ms", ha="center", va="bottom", fontsize=6.5, color="C1")
+    ax.set_xticks(xs, [_resize_label(i, r) for i, r in done], fontsize=7)
+    ax.set_ylim(0, 1.25 * top)
+    skipped = len(run.resizes) - len(done)
+    note = f" ({skipped} not applied, not shown)" if skipped else ""
+    ax.set(xlabel="resize (in order) and what it changed", ylabel="lag (s)",
+           title=f"Actuation lag breakdown, {len(done)} resizes{note}")
+    ax.legend(fontsize=7, loc="upper right", ncols=2)
     return _save(fig, path)
 
 
-def run_figures(run: Run, out_dir: Path, compare: list[Run] | None = None) -> list[Path]:
-    """Figures 1-6 for one run. Figure 5 overlays `compare` (other settings) when given."""
+def run_figures(run: Run, out_dir: Path) -> list[Path]:
+    """Figures 1-6 for one run."""
     return [
         fig1_arrival_rate(run, out_dir / "fig1-arrival-rate.png"),
         fig2_cpu(run, out_dir / "fig2-cpu.png"),
         fig3_memory(run, out_dir / "fig3-memory.png"),
         fig4_latency(run, out_dir / "fig4-latency.png"),
-        fig5_latency_cdf([run] + (compare or []), out_dir / "fig5-latency-cdf.png"),
+        fig5_outcomes(run, out_dir / "fig5-outcomes.png"),
         fig6_lag(run, out_dir / "fig6-lag.png"),
     ]
 

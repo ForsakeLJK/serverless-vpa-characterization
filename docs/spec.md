@@ -262,9 +262,11 @@ One 30-minute run on the Mac minikube cluster. The prototype only verifies the p
 1. Arrival rate over time for the window.
 2. CPU over time: usage, request, VPA target with lower and upper bounds.
 3. Memory over time: the same four series.
-4. Latency over time (p50 and p99 per 1-minute bucket) with resize events marked.
-5. Latency CDF, all three settings overlaid.
-6. Lag breakdown per resize: recommendation updated to pod patched, pod patched to kubelet applied.
+4. Latency over time as a line chart (p50, p95 and p99 per 1-minute bucket) with resize events marked.
+5. Request outcomes over time: requests per 1-minute bucket that completed, timed out or errored, stacked.
+6. Lag breakdown per resize as a stacked bar: recommendation updated to pod patched, pod patched to kubelet applied.
+
+Figures 2–5 mark every OOM kill. Figures are rendered at 300 dpi.
 7. Summary bars with median and range over repetitions, for the whole run and per phase: p99, throughput, error rate, mean allocated CPU and memory, mean utilization, resize count, failed or deferred resizes, OOM kills, throttled time.
 8. Transfer: figure 7 for window B.
 9. Tuning log table: iteration, observation, knob changed, result.

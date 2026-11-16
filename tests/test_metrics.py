@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from vpaexp.metrics import summarize
+from vpaexp.metrics import oom_kill_times, summarize
 from vpaexp.records import load_run
 
 from .synthetic import MI, T0, audit_rec, audit_resize, audit_status, pod, res, scenario, write_run
@@ -167,3 +167,14 @@ def test_audit_events_of_other_objects_on_the_cluster_are_ignored(tmp_path: Path
     )
     (resize,) = load_run(d).resizes
     assert resize.rec_updated_t == T0 + 10  # the last write to our VPA, not the other one's at 15s
+
+
+def test_oom_kill_times_cover_kills_inside_the_container_and_of_the_container(tmp_path: Path) -> None:
+    a = res(1000, 1000)
+    d = write_run(
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        sampler=[(float(i), 0.1, 100.0, 1 if i >= 20 else 0, 0, 0.0) for i in range(30)],
+        pods=[pod(0.0, a, a), pod(50.0, a, a, restarts=1, last_exit="OOMKilled"), pod(70.0, a, a, restarts=2, last_exit="Error")],
+    )
+    assert list(oom_kill_times(load_run(d)) - T0) == [20.0, 50.0]

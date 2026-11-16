@@ -56,6 +56,18 @@ def latencies(run: Run) -> tuple[Floats, Floats]:
     return c.scheduled[keep], latency[keep]
 
 
+def oom_kill_times(run: Run) -> Floats:
+    """When each OOM kill was observed: kills inside the container, and OOM kills of the container itself."""
+    s = run.samples
+    times: list[float] = np.repeat(s.t, s.oom_kills.astype(int)).tolist()
+    seen = 0
+    for p in run.pods:
+        if p.restarts > seen:
+            times += [p.t] * ((p.restarts - seen) if p.last_exit == "OOMKilled" else 0)
+            seen = p.restarts
+    return np.array(sorted(times), dtype=np.float64)
+
+
 def summarize(run: Run) -> dict[str, Summary]:
     return {name: _summarize(run, run.t0 + a, run.t0 + b) for name, (a, b) in phases(run).items()}
 
