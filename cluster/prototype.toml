@@ -10,11 +10,12 @@ function_url = "http://192.168.64.8:30080/"
 audit_log_cmd = ["kubectl", "--context", "vpa-serverless", "-n", "kube-system", "logs", "kube-apiserver-vpa-serverless", "--since=3h"]
 
 # Limits for sizing replays (no VPA), and the cap on the prototype's initial allocation.
-generous_cpu_millicores = 3000
-generous_memory_mib = 5120
+# System pods on the 4-vCPU VM already request about 1.2 CPU, so 2.5 is what fits.
+generous_cpu_millicores = 2500
+generous_memory_mib = 4096
 
 # maxAllowed = node allocatable minus this reserve. [verify value]
-system_reserve_cpu_millicores = 1000
+system_reserve_cpu_millicores = 1500
 system_reserve_memory_mib = 2048
 
 # Payload cost, measured once on the Mac outside a container [verify].

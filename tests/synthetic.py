@@ -16,7 +16,7 @@ def res(cpu_m: int, mem_mi: int) -> dict[str, str]:
 
 
 def pod(t: float, spec: dict[str, str], status: dict[str, str], conditions: list[dict[str, str]] | None = None,
-        restarts: int = 0) -> dict[str, Any]:
+        restarts: int = 0, last_exit: str = "") -> dict[str, Any]:
     return {
         "t": T0 + t,
         "kind": "pod",
@@ -27,7 +27,8 @@ def pod(t: float, spec: dict[str, str], status: dict[str, str], conditions: list
             "status": {
                 "conditions": [{"type": "Ready", "status": "True"}] + (conditions or []),
                 "containerStatuses": [
-                    {"name": "function", "restartCount": restarts, "resources": {"requests": status, "limits": status}}
+                    {"name": "function", "restartCount": restarts,
+                     "lastState": {"terminated": {"reason": last_exit}} if last_exit else {}, "resources": {"requests": status, "limits": status}}
                 ],
             },
         },

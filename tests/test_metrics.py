@@ -145,10 +145,25 @@ def test_container_restarts_are_counted_and_flag_a_static_run(tmp_path: Path) ->
         tmp_path,
         client=[(1.0, 0.1, "ok")],
         sampler=[(float(i), 0.1, 100.0, 0, 0, 0.0) for i in range(30)],
-        pods=[pod(0.0, a, a), pod(50.0, a, a, restarts=1)],
+        pods=[pod(0.0, a, a), pod(50.0, a, a, restarts=1, last_exit="OOMKilled"), pod(51.0, a, a, restarts=1, last_exit="OOMKilled")],
     )
     run = load_run(d)
     s = summarize(run)
     assert s["whole"]["container_restarts"] == 1
+    assert s["whole"]["oom_kills"] == 1  # the container-level OOM never reaches the cgroup counter we sample
     assert s["first_day"]["container_restarts"] == 0 and s["warmed"]["container_restarts"] == 1
-    assert static_sizing_too_low(run) == ["container restart"]
+    assert static_sizing_too_low(run) == ["container restart"]  # (the cgroup counter itself stayed at zero)
+
+
+def test_audit_events_of_other_objects_on_the_cluster_are_ignored(tmp_path: Path) -> None:
+    start, big = res(1000, 1000), res(2000, 1000)
+    other = audit_rec(15.0, big)
+    other["objectRef"]["name"] = "primes-vpa"
+    d = write_run(
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        pods=[pod(0.0, start, start), pod(20.1, big, big)],
+        audit=[audit_rec(10.0, start), other, audit_resize(20.0, big)],
+    )
+    (resize,) = load_run(d).resizes
+    assert resize.rec_updated_t == T0 + 10  # the last write to our VPA, not the other one's at 15s

@@ -55,6 +55,7 @@ class PodState:
     status: Allocation | None  # applied by the kubelet
     conditions: tuple[tuple[str, str], ...]  # (type, reason) of conditions that are True
     restarts: int
+    last_exit: str = ""  # why the previous container instance ended, e.g. OOMKilled
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,7 @@ def _pod_state(record: dict[str, Any]) -> PodState:
             (c["type"], c.get("reason", "")) for c in status.get("conditions", []) if c.get("status") == "True"
         ),
         restarts=int(cs.get("restartCount", 0)),
+        last_exit=str(cs.get("lastState", {}).get("terminated", {}).get("reason", "")),
     )
 
 
@@ -218,6 +220,10 @@ def _audit_time(event: dict[str, Any]) -> float:
 
 def _audit_matches(event: dict[str, Any], resource: str, subresource: str) -> bool:
     ref = event.get("objectRef", {})
+    # Only the experiment's own objects: the function pod (function-<hash>) and the VPA named function.
+    name = str(ref.get("name", ""))
+    if not (name == APP or name.startswith(APP + "-")):
+        return False
     return (
         event.get("stage") == "ResponseComplete"
         and event.get("verb") in ("patch", "update")

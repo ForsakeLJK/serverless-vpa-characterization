@@ -90,10 +90,16 @@ def _summarize(run: Run, a: float, b: float) -> Summary:
     out["throttled_periods"] = float(np.sum(s.throttled_periods[m]))
     out["throttled_s"] = float(np.sum(s.throttled_s[m]))
 
-    restarts = [(p.t, p.restarts) for p in run.pods]
-    out["container_restarts"] = float(
-        max((n for t, n in restarts if t < b), default=0) - max((n for t, n in restarts if t < a), default=0)
-    )
+    # An OOM that kills the whole container takes its cgroup, and the cgroup's counter, with it.
+    # Those kills are counted from the restarts the pod reports instead.
+    restarts, oom_restarts, seen = 0, 0, max((p.restarts for p in run.pods if p.t < a), default=0)
+    for p in run.pods:
+        if a <= p.t < b and p.restarts > seen:
+            restarts += p.restarts - seen
+            oom_restarts += (p.restarts - seen) if p.last_exit == "OOMKilled" else 0
+            seen = p.restarts
+    out["container_restarts"] = float(restarts)
+    out["oom_kills"] += oom_restarts
 
     here = [r for r in run.resizes if a <= r.patched_t < b]
     applied = [r for r in here if r.outcome == "applied"]

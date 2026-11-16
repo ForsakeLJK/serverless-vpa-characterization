@@ -286,7 +286,7 @@ def cmd_tune_select(args: argparse.Namespace) -> None:
     for r in iterations:
         w = metrics.summarize(r)["whole"]
         candidates.append(decisions.Candidate(str(r.meta["label"]), w["alloc_cpu_m"], w["alloc_mem_bytes"], w["p99_s"],
-                                             w["oom_kills"] + w["container_restarts"]))  # an OOM that kills the container shows as a restart
+                                             w["oom_kills"] + w["container_restarts"]))  # any restart disqualifies, OOM or not
     chosen, met = decisions.select_tuned(candidates, static_p99, static[0].initial)
     result = {"static_p99_s": static_p99, "candidates": [asdict(c) for c in candidates], "chosen": chosen.name, "constraint_met": met}
     print(json.dumps(result, indent=2))

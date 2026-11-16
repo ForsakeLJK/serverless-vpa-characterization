@@ -124,22 +124,16 @@ class WatchRecorder:
 
     def _watch(self, kind: str, what: list[str]) -> None:
         cmd = self.kc.base() + ["get", *what, "--watch", "--output-watch-events", "-o", "json"]
-        decoder = json.JSONDecoder()
         while not self._stop.is_set():  # kubectl ends a watch when the server closes it; start again
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
             with self._lock:
                 self._procs.append(proc)
             assert proc.stdout is not None
-            buf = ""
-            for line in proc.stdout:
-                buf += line
-                if line.rstrip() != "}":  # kubectl pretty-prints; an object ends with a bare closing brace
-                    continue
+            for line in proc.stdout:  # kubectl writes one watch event per line
                 try:
-                    event, end = decoder.raw_decode(buf.lstrip())
+                    event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                buf = buf.lstrip()[end:]
                 self._write({"t": time.time(), "kind": kind, "type": event.get("type"), "object": event.get("object")})
             proc.wait()
             self._stop.wait(1.0)
