@@ -8,7 +8,7 @@ import numpy as np
 
 from vpaexp.config import Allocation
 from vpaexp.records import Run
-from vpaexp.sizing import CPU_WINDOW_S, Peaks
+from vpaexp.sizing import Peaks
 from vpaexp.trace import Floats
 
 Summary = dict[str, float]
@@ -24,19 +24,15 @@ def phases(run: Run) -> dict[str, tuple[float, float]]:
     return out
 
 
-def allocation_steps(run: Run) -> tuple[Floats, Floats, Floats]:
-    """The allocation in force over time, as step-change times with CPU (millicores) and memory (bytes)."""
-    times, allocs = [-np.inf], [run.initial]
+def allocation_steps(run: Run) -> tuple[Floats, Floats]:
+    """The memory allocation in force over time, as step-change times and bytes."""
+    times, mem = [-np.inf], [run.initial.memory_bytes]
     for p in run.pods:
         current = p.status or p.spec
-        if current is not None and current != allocs[-1]:
+        if current is not None and current.memory_bytes != mem[-1]:
             times.append(p.t)
-            allocs.append(current)
-    return (
-        np.array(times),
-        np.array([a.cpu_millicores for a in allocs], dtype=np.float64),
-        np.array([a.memory_bytes for a in allocs], dtype=np.float64),
-    )
+            mem.append(current.memory_bytes)
+    return np.array(times), np.array(mem, dtype=np.float64)
 
 
 def _step_at(times: Floats, values: Floats, t: Floats) -> Floats:
@@ -48,12 +44,11 @@ def _step_mean(times: Floats, values: Floats, a: float, b: float) -> float:
     return float(np.sum(values * np.diff(edges)) / (b - a))
 
 
-def utilization(run: Run) -> tuple[Floats, Floats]:
-    """(CPU, memory) usage as a fraction of the allocation in force, for every 1s sample."""
+def memory_utilization(run: Run) -> Floats:
+    """Memory usage as a fraction of the allocation in force, for every 1s sample."""
     s = run.samples
-    times, cpu_m, mem = allocation_steps(run)
-    mid = s.t - 0.5  # a sample covers the second before it
-    return s.cpu_cores / (_step_at(times, cpu_m, mid) / 1000), s.memory_bytes / _step_at(times, mem, mid)
+    times, mem = allocation_steps(run)
+    return np.asarray(s.memory_bytes / _step_at(times, mem, s.t - 0.5), dtype=np.float64)  # a sample covers the second before it
 
 
 def latencies(run: Run) -> tuple[Floats, Floats]:
@@ -100,19 +95,16 @@ def _summarize(run: Run, a: float, b: float) -> Summary:
     out["timeout_rate"] = float(np.sum(status == "timeout")) / n if n else 0.0
     out["error_rate"] = float(np.sum(status == "error")) / n if n else 0.0
 
-    times, cpu_m, mem = allocation_steps(run)
-    out["alloc_cpu_m"] = _step_mean(times, cpu_m, a, b)
+    times, mem = allocation_steps(run)
     out["alloc_mem_bytes"] = _step_mean(times, mem, a, b)
 
     m = (s.t > a) & (s.t <= b)
-    out["usage_cpu_cores"] = _mean(s.cpu_cores[m])
     out["usage_mem_bytes"] = _mean(s.memory_bytes[m])
-    util_cpu, util_mem = utilization(run)
-    out["util_cpu"] = _mean(util_cpu[m])
-    out["util_mem"] = _mean(util_mem[m])
+    out["util_mem"] = _mean(memory_utilization(run)[m])
     out["oom_kills"] = float(np.sum(s.oom_kills[m]))
-    out["throttled_periods"] = float(np.sum(s.throttled_periods[m]))
-    out["throttled_s"] = float(np.sum(s.throttled_s[m]))
+    # Not a result: CPU is fixed and generous in every setting (section 6). Any throttling
+    # means CPU was a constraint after all, and the run's memory results are in doubt.
+    out["cpu_throttled_s"] = float(np.sum(s.throttled_s[m]))
 
     # An OOM that kills the whole container takes its cgroup, and the cgroup's counter, with it.
     # Those kills are counted from the restarts the pod reports instead.
@@ -128,8 +120,6 @@ def _summarize(run: Run, a: float, b: float) -> Summary:
     here = [r for r in run.resizes if a <= r.patched_t < b]
     applied = [r for r in here if r.outcome == "applied"]
     out["resizes"] = len(applied)
-    out["resize_cpu_up"] = sum(r.after.cpu_millicores > r.before.cpu_millicores for r in applied)
-    out["resize_cpu_down"] = sum(r.after.cpu_millicores < r.before.cpu_millicores for r in applied)
     out["resize_mem_up"] = sum(r.after.memory_bytes > r.before.memory_bytes for r in applied)
     out["resize_mem_down"] = sum(r.after.memory_bytes < r.before.memory_bytes for r in applied)
     out["resizes_failed_or_deferred"] = sum(bool(r.issues) or r.outcome != "applied" for r in here)
@@ -138,15 +128,6 @@ def _summarize(run: Run, a: float, b: float) -> Summary:
 
 def _mean(x: Floats) -> float:
     return float(np.mean(x)) if len(x) else float("nan")
-
-
-def rolling_cpu_peak(run: Run, window_s: float = CPU_WINDOW_S) -> float:
-    """Highest mean CPU usage over any window of 15 consecutive 1s samples."""
-    w = int(window_s)
-    cpu = run.samples.cpu_cores
-    if len(cpu) < w:
-        return _mean(cpu)
-    return float(np.max(np.convolve(cpu, np.ones(w) / w, mode="valid")))
 
 
 def measured_peaks(run: Run) -> Peaks:
@@ -158,19 +139,25 @@ def measured_peaks(run: Run) -> Peaks:
     concurrency = int(np.max(np.cumsum(delta[order]))) if len(events) else 0
     s = run.samples
     memory = float(max(np.max(s.memory_bytes), np.max(s.memory_peak_bytes))) if len(s.t) else float("nan")
-    return Peaks(concurrency, rolling_cpu_peak(run), memory)
+    return Peaks(concurrency, memory)
 
 
 def static_sizing_too_low(run: Run) -> list[str]:
-    """Section 6.1 campaign check: an OOM kill, or CPU at the limit for a whole 15s window."""
+    """Section 6.1 campaign check: a static run must show no OOM kill."""
     problems = []
     if np.sum(run.samples.oom_kills) > 0:
         problems.append("OOM kill")
     if any(p.restarts for p in run.pods):
         problems.append("container restart")
-    if rolling_cpu_peak(run) >= 0.99 * run.initial.cpu_millicores / 1000:
-        problems.append("CPU usage at the limit for a whole 15s window")
     return problems
+
+
+def cpu_was_limiting(run: Run) -> str | None:
+    """Validity check for any run: the fixed CPU must be generous enough never to throttle."""
+    throttled = float(np.sum(run.samples.throttled_s))
+    if throttled <= 0:
+        return None
+    return f"CPU was throttled for {throttled:.1f}s ({100 * throttled / run.duration_s:.1f}% of the run)"
 
 
 def aggregate(summaries: list[Summary]) -> dict[str, dict[str, float]]:

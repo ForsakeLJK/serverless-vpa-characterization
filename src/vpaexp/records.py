@@ -44,6 +44,10 @@ def _allocation(quantities: dict[str, str] | None) -> Allocation | None:
     return Allocation(parse_cpu(quantities["cpu"]), parse_memory(quantities["memory"]))
 
 
+def _memory(quantities: dict[str, str] | None) -> int | None:
+    return parse_memory(quantities["memory"]) if quantities and "memory" in quantities else None
+
+
 def _container(items: list[dict[str, Any]] | None) -> dict[str, Any]:
     return next((c for c in items or [] if c.get("name", c.get("containerName")) == APP), {})
 
@@ -61,10 +65,12 @@ class PodState:
 
 @dataclass(frozen=True)
 class Recommendation:
+    """A VPA memory recommendation, in bytes. VPA controls memory only (section 6.4)."""
+
     t: float
-    target: Allocation
-    lower: Allocation
-    upper: Allocation
+    target: int
+    lower: int
+    upper: int
 
 
 @dataclass(frozen=True)
@@ -208,7 +214,7 @@ def _recommendations(watch: list[dict[str, Any]]) -> list[Recommendation]:
         if r["kind"] != "vpa":
             continue
         c = _recommended(r["object"])
-        target, lower, upper = (_allocation(c.get(k)) for k in ("target", "lowerBound", "upperBound"))
+        target, lower, upper = (_memory(c.get(k)) for k in ("target", "lowerBound", "upperBound"))
         if target is None or lower is None or upper is None:
             continue
         if out and (out[-1].target, out[-1].lower, out[-1].upper) == (target, lower, upper):
@@ -237,10 +243,10 @@ def _audit_matches(event: dict[str, Any], resource: str, subresource: str) -> bo
 
 def derive_resizes(initial: Allocation, audit: list[dict[str, Any]], pods: list[PodState]) -> list[Resize]:
     """Pair every pod resize patch with the recommendation behind it and the kubelet applying it."""
-    rec_updates: list[tuple[float, Allocation]] = []
+    rec_updates: list[tuple[float, int]] = []
     for e in audit:
         if _audit_matches(e, "verticalpodautoscalers", "status") and _ok(e):
-            target = _allocation(_recommended(e.get("responseObject", {})).get("target"))
+            target = _memory(_recommended(e.get("responseObject", {})).get("target"))
             if target is not None:
                 rec_updates.append((_audit_time(e), target))
     rec_updates.sort(key=lambda u: u[0])
@@ -277,7 +283,7 @@ def derive_resizes(initial: Allocation, audit: list[dict[str, Any]], pods: list[
                 before=current,
                 after=after,
                 patched_t=t,
-                rec_updated_t=_recommended_at(rec_updates, t, after),
+                rec_updated_t=_recommended_at(rec_updates, t, after.memory_bytes),
                 applied_t=applied_t,
                 issues=tuple(issues),
                 outcome="applied" if applied_t is not None else "pending",
@@ -307,7 +313,7 @@ def _ok(event: dict[str, Any]) -> bool:
     return 200 <= int(event.get("responseStatus", {}).get("code", 0)) < 300
 
 
-def _recommended_at(updates: list[tuple[float, Allocation]], patched_t: float, value: Allocation | None) -> float | None:
+def _recommended_at(updates: list[tuple[float, int]], patched_t: float, value: int | None) -> float | None:
     """When the recommendation behind a patch was written.
 
     That is the first write in the latest unbroken run of writes carrying the patched value.

@@ -11,7 +11,10 @@ T0 = 1_000_000.0
 MI = 1024 * 1024
 
 
-def res(cpu_m: int, mem_mi: int) -> dict[str, str]:
+CPU_M = 1000  # fixed in every run: VPA controls memory only
+
+
+def res(mem_mi: int, cpu_m: int = CPU_M) -> dict[str, str]:
     return {"cpu": f"{cpu_m}m", "memory": f"{mem_mi}Mi"}
 
 
@@ -39,6 +42,7 @@ def pod(t: float, spec: dict[str, str], status: dict[str, str], conditions: list
 
 
 def rec_obj(target: dict[str, str], lower: dict[str, str], upper: dict[str, str]) -> dict[str, Any]:
+    target, lower, upper = ({"memory": r["memory"]} for r in (target, lower, upper))  # a memory-only VPA recommends no CPU
     return {
         "status": {
             "recommendation": {
@@ -118,7 +122,7 @@ def write_run(
         "replay_duration_s": duration_s,
         "phase_boundary_s": phase_boundary_s,
         "timeout_s": 3.3,
-        "allocation": {"cpu_millicores": 1000, "memory_bytes": 1000 * MI},
+        "allocation": {"cpu_millicores": CPU_M, "memory_bytes": 1000 * MI},
     }
     (d / "run.json").write_text(json.dumps(base | (meta or {})))
     with open(d / "client.csv", "w") as f:
@@ -143,8 +147,8 @@ def write_run(
 
 
 def scenario(d: Path, **meta: Any) -> Path:
-    """One CPU resize up (t=20, applied 22) and one CPU+memory resize down (t=60, deferred, applied 65)."""
-    big, small, start = res(2000, 1000), res(500, 500), res(1000, 1000)
+    """One memory resize up (t=20, applied 22) and one down (t=60, deferred, applied 65). Usage is 500 Mi throughout."""
+    big, small, start = res(2000), res(500), res(1000)
     client = [(float(i), 0.2, "ok") for i in range(10)]
     client += [(40.0 + i * 0.5, 0.1, "ok") for i in range(97)]
     client += [(90.0, 3.3, "timeout"), (91.0, 3.3, "timeout"), (92.0, 0.05, "error")]
@@ -164,8 +168,8 @@ def scenario(d: Path, **meta: Any) -> Path:
             pod(65.0, small, small),
         ],
         vpas=[
-            vpa(10.0, big, res(900, 900), res(4000, 2000)),
-            vpa(58.0, small, res(400, 400), res(700, 700)),
+            vpa(10.0, big, res(900), res(4000)),
+            vpa(58.0, small, res(400), res(700)),
         ],
         audit=[
             audit_rec(5.0, start),

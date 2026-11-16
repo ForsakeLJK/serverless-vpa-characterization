@@ -45,13 +45,14 @@ def test_unscaled_flags_are_the_upstream_defaults() -> None:
 
 
 def test_tuning_overrides_a_declared_knob_and_leaves_the_rest() -> None:
-    f = vpa_flags(k=4, overrides={"cpu-histogram-decay-half-life": "1h0m0s", "pod-update-threshold": "0.05"})
-    assert f.recommender["cpu-histogram-decay-half-life"] == "1h0m0s"
+    f = vpa_flags(k=4, overrides={"memory-histogram-decay-half-life": "1h0m0s", "pod-update-threshold": "0.05"})
+    assert f.recommender["memory-histogram-decay-half-life"] == "1h0m0s"
     assert f.updater["pod-update-threshold"] == "0.05"
-    assert f.recommender["memory-histogram-decay-half-life"] == "6h0m0s"
+    assert f.recommender["memory-aggregation-interval"] == "6h0m0s"
 
 
-@pytest.mark.parametrize("knob", ["recommender-interval", "updater-interval", "evict-after-oom-threshold", "nope"])
+@pytest.mark.parametrize("knob", ["recommender-interval", "updater-interval", "evict-after-oom-threshold", "nope",
+                                  "cpu-histogram-decay-half-life", "target-cpu-percentile", "pod-recommendation-min-cpu-millicores"])
 def test_tuning_may_not_touch_anything_outside_the_declared_knobs(knob: str) -> None:
     with pytest.raises(UndeclaredKnob):
         vpa_flags(k=4, overrides={knob: "1s"})
@@ -77,10 +78,11 @@ def test_function_pod_is_guaranteed_and_never_restarts_on_resize() -> None:
     assert {"name": "CONCURRENCY_CAP", "value": "68"} in c["env"]
 
 
-def test_vpa_object_resizes_in_place_and_keeps_requests_equal_to_limits() -> None:
-    v = vpa_manifest("ns", max_allowed=Allocation(cpu_millicores=60000, memory_bytes=200 * 1024 * MI))
+def test_vpa_object_resizes_memory_only_in_place_and_keeps_requests_equal_to_limits() -> None:
+    v = vpa_manifest("ns", max_memory_bytes=200 * 1024 * MI)
     assert v["spec"]["targetRef"] == {"apiVersion": "apps/v1", "kind": "Deployment", "name": "function"}
     assert v["spec"]["updatePolicy"]["updateMode"] == "InPlace"
     (policy,) = v["spec"]["resourcePolicy"]["containerPolicies"]
     assert policy["controlledValues"] == "RequestsAndLimits"
-    assert policy["maxAllowed"] == {"cpu": "60000m", "memory": "204800Mi"}
+    assert policy["controlledResources"] == ["memory"]
+    assert policy["maxAllowed"] == {"memory": "204800Mi"}

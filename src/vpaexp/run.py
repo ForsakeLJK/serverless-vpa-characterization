@@ -18,7 +18,7 @@ from vpaexp.cluster import (
     WatchRecorder,
     component_versions,
     extract_audit,
-    max_allowed,
+    max_allowed_memory,
 )
 from vpaexp.config import Allocation, VpaFlags
 from vpaexp.loadgen import run_replay
@@ -41,7 +41,7 @@ class RunPlan:
     k: int
     schedule: Floats  # send times, seconds from replay start
     duration_s: float
-    allocation: Allocation  # initial (and, without VPA, permanent) requests = limits
+    allocation: Allocation  # requests = limits. CPU is fixed; memory is initial (without VPA, permanent)
     concurrency_cap: int
     flags: VpaFlags | None  # None: no VPA object
     service_s: float
@@ -100,7 +100,7 @@ def execute(profile: Profile, plan: RunPlan) -> Path:
     clean_state(kc, plan.flags)
 
     deployment = config.deployment_manifest(profile.namespace, profile.image, plan.allocation, plan.concurrency_cap)
-    vpa = config.vpa_manifest(profile.namespace, max_allowed(kc, profile.system_reserve)) if plan.flags else None
+    vpa = config.vpa_manifest(profile.namespace, max_allowed_memory(kc, profile.system_reserve_memory_bytes)) if plan.flags else None
     kc.apply(deployment, config.service_manifest(profile.namespace))
     kc.run("rollout", "status", f"deployment/{config.APP}", "--timeout=300s")
     (pod,) = kc.json("get", "pods", "-l", f"app={config.APP}")["items"]

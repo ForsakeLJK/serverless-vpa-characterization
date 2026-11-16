@@ -11,12 +11,12 @@ audit_log_cmd = ["sudo", "cat", "/var/log/kubernetes/audit/audit.log"]
 # The load generator and collectors pin themselves to this NUMA node; pods run on node 0.
 client_numa_node = 1
 
-# Limits for sizing replays (no VPA).
+# CPU: fixed for every run in every setting. VPA does not control it; it must be high enough
+# that the function is never throttled. Memory: the limit for sizing replays (no VPA).
 generous_cpu_millicores = 32000
 generous_memory_mib = 65536
 
 # maxAllowed = node allocatable minus this reserve. [verify value] (spec section 13)
-system_reserve_cpu_millicores = 4000
 system_reserve_memory_mib = 16384
 
 # Payload cost: Mac estimates [verify]. Run `vpaexp --profile full measure` first; it overrides these.

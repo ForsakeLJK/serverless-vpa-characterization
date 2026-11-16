@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from vpaexp.config import Allocation
-from vpaexp.records import parse_cpu, parse_memory
+from vpaexp.records import parse_memory
 from vpaexp.sizing import MI
 
 
@@ -24,8 +24,8 @@ class Profile:
     context: str
     function_url: str
     audit_log_cmd: list[str]
-    generous: Allocation
-    system_reserve: Allocation
+    generous: Allocation  # CPU: the fixed CPU of every run. Memory: the limit of sizing replays.
+    system_reserve_memory_bytes: int
     service_s: float
     request_mem_bytes: int
     baseline_mem_bytes: int
@@ -42,7 +42,7 @@ class Profile:
             function_url=d["function_url"],
             audit_log_cmd=d["audit_log_cmd"],
             generous=Allocation(d["generous_cpu_millicores"], d["generous_memory_mib"] * MI),
-            system_reserve=Allocation(d["system_reserve_cpu_millicores"], d["system_reserve_memory_mib"] * MI),
+            system_reserve_memory_bytes=d["system_reserve_memory_mib"] * MI,
             service_s=d["service_s"],
             request_mem_bytes=d["request_mem_mib"] * MI,
             baseline_mem_bytes=d["baseline_mem_mib"] * MI,
@@ -73,14 +73,10 @@ class Kubectl:
         self.run("apply", "-f", "-", stdin=json.dumps({"apiVersion": "v1", "kind": "List", "items": list(manifests)}))
 
 
-def max_allowed(kc: Kubectl, reserve: Allocation) -> Allocation:
-    """Node allocatable minus the fixed system reserve (section 6.4)."""
+def max_allowed_memory(kc: Kubectl, reserve_bytes: int) -> int:
+    """Node allocatable memory minus the fixed system reserve (section 6.4)."""
     (node,) = kc.json("get", "nodes", namespaced=False)["items"]
-    a = node["status"]["allocatable"]
-    return Allocation(
-        parse_cpu(a["cpu"]) - reserve.cpu_millicores,
-        (parse_memory(a["memory"]) - reserve.memory_bytes) // MI * MI,
-    )
+    return (parse_memory(node["status"]["allocatable"]["memory"]) - reserve_bytes) // MI * MI
 
 
 def component_versions(kc: Kubectl) -> dict[str, Any]:

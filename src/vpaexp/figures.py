@@ -11,8 +11,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from vpaexp.metrics import Summary, aggregate, allocation_steps, latencies, oom_kill_times, utilization
-from vpaexp.records import Recommendation, Resize, Run
+from vpaexp.metrics import Summary, aggregate, allocation_steps, latencies, memory_utilization, oom_kill_times
+from vpaexp.records import Resize, Run
 from vpaexp.sizing import MI
 from vpaexp.trace import Floats
 
@@ -59,53 +59,40 @@ def fig1_arrival_rate(run: Run, path: Path) -> Path:
     return _save(fig, path)
 
 
-def _resource_figure(run: Run, path: Path, resource: str) -> Path:
+def fig2_memory(run: Run, path: Path) -> Path:
+    """Memory over time: usage, request, and the VPA target with its lower and upper bounds."""
     unit, xlabel = _axis(run)
-    cpu = resource == "cpu"
-    scale = 1.0 if cpu else float(MI)
     s = run.samples
-    usage = s.cpu_cores if cpu else s.memory_bytes / scale
-    times, cpu_m, mem = allocation_steps(run)
-    request = cpu_m / 1000 if cpu else mem / scale
-    end = run.t0 + run.duration_s
-    times = np.append(np.maximum(times, run.t0), end)
+    usage = s.memory_bytes / MI
+    times, mem = allocation_steps(run)
+    request = mem / MI
+    times = np.append(np.maximum(times, run.t0), run.t0 + run.duration_s)
+    recs = run.recommendations
 
-    def series(recs: list[Recommendation], which: str) -> tuple[list[float], list[float]]:
-        ts = [(r.t - run.t0) / unit for r in recs] + [run.duration_s / unit]
-        vals = [getattr(getattr(r, which), "cpu_millicores") / 1000 if cpu else getattr(r, which).memory_bytes / scale
-                for r in recs]
-        return ts, vals + vals[-1:]
+    def series(which: str) -> list[float]:
+        vals = [getattr(r, which) / MI for r in recs]
+        return vals + vals[-1:]
 
     fig, ax = plt.subplots(figsize=(8, 3.5))
     ax.plot((s.t - run.t0) / unit, usage, lw=0.5, color="C0", label="usage (1s)")
     ax.step((times - run.t0) / unit, np.append(request, request[-1]), where="post", color="k", lw=1.2, label="request")
-    if run.recommendations:
-        ts, target = series(run.recommendations, "target")
+    if recs:
+        ts = [(r.t - run.t0) / unit for r in recs] + [run.duration_s / unit]
+        target = series("target")
         ax.step(ts, target, where="post", color="C1", lw=1.0, label="VPA target")
-        _, lower = series(run.recommendations, "lower")
-        _, upper = series(run.recommendations, "upper")
-        ax.fill_between(ts, lower, upper, step="post", color="C1", alpha=0.15, label="lower to upper bound")
-        ax.set_ylim(0, 1.3 * max(float(np.max(request)), float(np.max(target)), float(np.max(usage, initial=0))))
-    ax.set(xlabel=xlabel, ylabel="CPU (cores)" if cpu else "memory (MiB)",
-           title=f"{'CPU' if cpu else 'Memory'}: {run.meta.get('setting')}, window {run.meta.get('window')}")
+        ax.fill_between(ts, series("lower"), series("upper"), step="post", color="C1", alpha=0.15, label="lower to upper bound")
+        ax.set_ylim(0, 1.3 * max(float(np.max(request)), max(target), float(np.max(usage, initial=0))))
+    ax.set(xlabel=xlabel, ylabel="memory (MiB)",
+           title=f"Memory: {run.meta.get('setting')}, window {run.meta.get('window')}")
     _mark_oom_kills(ax, run, unit)
     ax.legend(fontsize=7, loc="upper right")
     return _save(fig, path)
 
 
-def fig2_cpu(run: Run, path: Path) -> Path:
-    return _resource_figure(run, path, "cpu")
-
-
-def fig3_memory(run: Run, path: Path) -> Path:
-    return _resource_figure(run, path, "memory")
-
-
-def _utilization_figure(run: Run, path: Path, resource: str) -> Path:
-    """Usage as a percentage of the allocation in force: every 1s sample, and the 1-minute mean."""
+def fig3_memory_utilization(run: Run, path: Path) -> Path:
+    """Memory usage as a percentage of the allocation in force: every 1s sample, and the 1-minute mean."""
     unit, xlabel = _axis(run)
-    cpu = resource == "cpu"
-    percent = 100 * utilization(run)[0 if cpu else 1]
+    percent = 100 * memory_utilization(run)
     t = run.samples.t - run.t0
     edges = _buckets(run)
     bucket = np.digitize(t, edges) - 1
@@ -122,19 +109,10 @@ def _utilization_figure(run: Run, path: Path, resource: str) -> Path:
     # A sample that straddles a resize can read far above 100% of the new, smaller allocation;
     # the axis stops at 150% so that those few samples do not flatten everything else.
     ax.set_ylim(0, 150)
-    ax.set(xlabel=xlabel, ylabel=f"{'CPU' if cpu else 'memory'} utilization (% of allocation)",
-           title=f"{'CPU' if cpu else 'Memory'} utilization: {run.meta.get('setting')}, "
-                 f"window {run.meta.get('window')} (mean {overall:.0f}%)")
+    ax.set(xlabel=xlabel, ylabel="memory utilization (% of allocation)",
+           title=f"Memory utilization: {run.meta.get('setting')}, window {run.meta.get('window')} (mean {overall:.0f}%)")
     ax.legend(fontsize=7, loc="upper right", ncols=5)
     return _save(fig, path)
-
-
-def fig2b_cpu_utilization(run: Run, path: Path) -> Path:
-    return _utilization_figure(run, path, "cpu")
-
-
-def fig3b_memory_utilization(run: Run, path: Path) -> Path:
-    return _utilization_figure(run, path, "memory")
 
 
 def _buckets(run: Run) -> Floats:
@@ -190,9 +168,7 @@ def _resize_label(i: int, r: Resize) -> str:
     def arrow(before: int, after: int) -> str:
         return "\u2191" if after > before else "\u2193" if after < before else ""
 
-    cpu = arrow(r.before.cpu_millicores, r.after.cpu_millicores)
-    mem = arrow(r.before.memory_bytes, r.after.memory_bytes)
-    return f"{i}\n" + " ".join(part for part in (f"cpu{cpu}" if cpu else "", f"mem{mem}" if mem else "") if part)
+    return f"{i}\nmem{arrow(r.before.memory_bytes, r.after.memory_bytes)}"
 
 
 def fig6_lag(run: Run, path: Path) -> Path:
@@ -240,20 +216,20 @@ def overview(panels: list[Path], path: Path, title: str) -> Path:
 
 
 def run_figures(run: Run, out_dir: Path) -> list[Path]:
-    """Figures 1-6 for one run (with 2b and 3b), then an overview page with all of them together."""
-    arrivals = fig1_arrival_rate(run, out_dir / "fig1-arrival-rate.png")
-    cpu = fig2_cpu(run, out_dir / "fig2-cpu.png")
-    cpu_util = fig2b_cpu_utilization(run, out_dir / "fig2b-cpu-utilization.png")
-    memory = fig3_memory(run, out_dir / "fig3-memory.png")
-    memory_util = fig3b_memory_utilization(run, out_dir / "fig3b-memory-utilization.png")
-    latency = fig4_latency(run, out_dir / "fig4-latency.png")
-    outcomes = fig5_outcomes(run, out_dir / "fig5-outcomes.png")
-    lag = fig6_lag(run, out_dir / "fig6-lag.png")
+    """Figures 1-6 for one run, then an overview page with all of them together."""
+    panels = [
+        fig1_arrival_rate(run, out_dir / "fig1-arrival-rate.png"),
+        fig2_memory(run, out_dir / "fig2-memory.png"),
+        fig3_memory_utilization(run, out_dir / "fig3-memory-utilization.png"),
+        fig4_latency(run, out_dir / "fig4-latency.png"),
+        fig5_outcomes(run, out_dir / "fig5-outcomes.png"),
+        fig6_lag(run, out_dir / "fig6-lag.png"),
+    ]
+    arrivals, memory, utilization, latency, outcomes, lag = panels
     title = f"{run.meta.get('setting')}, window {run.meta.get('window')}, {run.path.name}"
-    # On the overview each resource sits beside its utilization.
-    rows = [arrivals, outcomes, cpu, cpu_util, memory, memory_util, latency, lag]
-    return [arrivals, cpu, cpu_util, memory, memory_util, latency, outcomes, lag,
-            overview(rows, out_dir / "overview.png", title)]
+    # On the overview, memory sits beside its utilization.
+    rows = [arrivals, outcomes, memory, utilization, latency, lag]
+    return panels + [overview(rows, out_dir / "overview.png", title)]
 
 
 SUMMARY_PANELS = [
@@ -261,14 +237,11 @@ SUMMARY_PANELS = [
     ("throughput_rps", "throughput (rps)", 1.0),
     ("timeout_rate", "timeouts (% of sent)", 100.0),
     ("error_rate", "errors (% of sent)", 100.0),
-    ("alloc_cpu_m", "mean allocated CPU (cores)", 1e-3),
     ("alloc_mem_bytes", "mean allocated memory (MiB)", 1 / MI),
-    ("util_cpu", "mean CPU utilization (%)", 100.0),
     ("util_mem", "mean memory utilization (%)", 100.0),
     ("resizes", "applied resizes", 1.0),
     ("resizes_failed_or_deferred", "failed or deferred resizes", 1.0),
     ("oom_kills", "OOM kills", 1.0),
-    ("throttled_s", "throttled time (s)", 1.0),
 ]
 
 
@@ -279,7 +252,7 @@ def fig7_summary(by_setting: dict[str, list[dict[str, Summary]]], path: Path, ti
     """
     settings = list(by_setting)
     phase_names = list(next(iter(by_setting.values()))[0])
-    fig, axes = plt.subplots(3, 4, figsize=(15, 9))
+    fig, axes = plt.subplots(3, 3, figsize=(12, 9))
     width = 0.8 / len(settings)
     for ax, (key, label, factor) in zip(axes.flat, SUMMARY_PANELS):
         for i, setting in enumerate(settings):

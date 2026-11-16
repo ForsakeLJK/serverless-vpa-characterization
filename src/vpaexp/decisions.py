@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from vpaexp.config import Allocation
 from vpaexp.metrics import Summary, summarize
 from vpaexp.records import Run
 
@@ -20,33 +19,24 @@ class Candidate:
     """One tuning iteration's whole-run result."""
 
     name: str
-    alloc_cpu_m: float
     alloc_mem_bytes: float
     p99_s: float
     oom_kills: float
 
 
-def select_tuned(candidates: list[Candidate], static_p99_s: float, static: Allocation) -> tuple[Candidate, bool]:
-    """Section 7 selection rule. Returns the chosen iteration and whether the constraint was met.
-
-    "Lowest mean allocated CPU and memory" is scored as the sum of each resource's mean
-    allocation as a fraction of the static allocation, so neither unit dominates.
-    """
+def select_tuned(candidates: list[Candidate], static_p99_s: float) -> tuple[Candidate, bool]:
+    """Section 7 selection rule. Returns the chosen iteration and whether the constraint was met."""
     eligible = [c for c in candidates if c.oom_kills == 0 and c.p99_s <= P99_ALLOWANCE * static_p99_s]
     if not eligible:
         return min(candidates, key=lambda c: c.p99_s), False
-
-    def cost(c: Candidate) -> float:
-        return c.alloc_cpu_m / static.cpu_millicores + c.alloc_mem_bytes / static.memory_bytes
-
-    return min(eligible, key=cost), True
+    return min(eligible, key=lambda c: c.alloc_mem_bytes), True
 
 
-H1_METRICS = ("alloc_cpu_m", "alloc_mem_bytes", "p99_s")
+H1_METRICS = ("alloc_mem_bytes", "p99_s")
 
 
 def h1(default: list[Summary], tuned: list[Summary]) -> dict[str, Any]:
-    """H1: tuned beats default on mean allocation or p99 by more than the spread of the repetitions.
+    """H1: tuned beats default on mean memory allocation or p99 by more than the spread of the repetitions.
 
     A metric is beaten when the median improves by more than the larger of the two
     min-to-max spreads. H1 is supported if any of the metrics is beaten.
@@ -82,16 +72,18 @@ def gate_checks(run: Run) -> list[Check]:
     refused = [r for r in attempted if r.outcome != "applied" and r.issues]
     required = [r for r in attempted if r not in refused]
     complete = sum(r.complete for r in required)
+    cpu_values = {a.cpu_millicores for p in run.pods for a in (p.spec, p.status) if a is not None}
     return [
         Check(
-            "1. at least one CPU resize up and one down",
-            s["resize_cpu_up"] >= 1 and s["resize_cpu_down"] >= 1,
-            f"{s['resize_cpu_up']:.0f} up, {s['resize_cpu_down']:.0f} down",
+            "1. at least one memory resize up and one down",
+            s["resize_mem_up"] >= 1 and s["resize_mem_down"] >= 1,
+            f"{s['resize_mem_up']:.0f} up, {s['resize_mem_down']:.0f} down",
         ),
         Check(
-            "2. at least one memory resize",
-            s["resize_mem_up"] + s["resize_mem_down"] >= 1,
-            f"{s['resize_mem_up']:.0f} up, {s['resize_mem_down']:.0f} down",
+            "2. CPU is never resized",
+            not cpu_values - {run.initial.cpu_millicores},
+            f"CPU stayed at {run.initial.cpu_millicores}m" if not cpu_values - {run.initial.cpu_millicores}
+            else f"CPU took the values {sorted(cpu_values)}m",
         ),
         Check(
             "3. all three lag timestamps for every resize",

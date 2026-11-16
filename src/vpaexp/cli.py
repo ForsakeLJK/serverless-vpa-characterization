@@ -68,6 +68,10 @@ class Experiment:
                 found.append(load_run(d))
         return found
 
+    def allocation(self, memory_bytes: int) -> Allocation:
+        """CPU is the profile's fixed, generous value in every run; only memory varies (section 6)."""
+        return Allocation(self.profile.generous.cpu_millicores, memory_bytes)
+
     def plan(self, s: Slice, schedule: Floats, duration_s: float, out: Path, setting: str, alloc: Allocation, cap: int,
              flags: config.VpaFlags | None, rep: int = 0, **kw: Any) -> RunPlan:
         return RunPlan(out_dir=out, setting=setting, slice_name=s.name, rep=rep, k=K, schedule=schedule,
@@ -120,13 +124,16 @@ def cmd_size(args: argparse.Namespace) -> None:
     demand = exp.demand(window)
     record: dict[str, Any] = {"window": window.name, "payload_cost": exp.payload_cost(), "demand": demand.to_json()}
     generous = exp.profile.generous
-    if demand.peaks.cpu_cores * 1000 > generous.cpu_millicores or demand.peaks.memory_bytes > generous.memory_bytes:
-        log("WARNING: calculated peak demand exceeds the profile's generous limits")
+    if demand.peaks.memory_bytes > generous.memory_bytes:
+        log("WARNING: calculated peak memory exceeds the profile's generous limit")
+    if demand.peaks.concurrency * 1000 > generous.cpu_millicores:
+        log(f"WARNING: peak concurrency is {demand.peaks.concurrency} but the fixed CPU is only "
+            f"{generous.cpu_millicores}m; raise generous_cpu_millicores in the profile")
     cap = sizing.CAP_FACTOR * demand.peaks.concurrency
 
     if args.validate:
-        # Centre the hour on the middle of the calculated peak-CPU window.
-        lo = min(max(demand.cpu_at_s + sizing.CPU_WINDOW_S / 2 - VALIDATION_S / 2, 0.0), window.replay_duration_s() - VALIDATION_S)
+        # Centre the hour on the calculated memory peak.
+        lo = min(max(demand.memory_at_s - VALIDATION_S / 2, 0.0), window.replay_duration_s() - VALIDATION_S)
         s = Slice(f"{window.name}-validate", window.trace_start_s + lo * K, VALIDATION_S * K)
         slice_calc = exp.demand(s).peaks
         out = exp.run_dir(s.name, args.force)
@@ -187,7 +194,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         schedule, duration, label = schedule[schedule < args.limit_s], args.limit_s, f"{label}-smoke"
     boundary = DAY_S / K
     out = exp.run_dir(f"{window.name}-{args.setting}-{label}", args.force)
-    plan = exp.plan(window, schedule, duration, out, args.setting, Allocation(size.cpu_millicores, size.memory_bytes),
+    plan = exp.plan(window, schedule, duration, out, args.setting, exp.allocation(size.memory_bytes),
                     size.concurrency_cap, _flags(args.setting, args.config), rep=args.rep,
                     phase_boundary_s=boundary if duration > boundary else None,
                     extra={"label": label, "tuned_config": args.config})
@@ -195,9 +202,16 @@ def cmd_run(args: argparse.Namespace) -> None:
     run = load_run(out)
     print(json.dumps(metrics.summarize(run)["whole"], indent=2))
     print(figures.run_figures(run, out / "figures")[-1])
+    _warn_if_cpu_limiting(run)
     if args.setting == "static" and not args.limit_s:
         for problem in metrics.static_sizing_too_low(run):
             print(f"SIZING TOO LOW ({problem}): redo sizing with --full-profile and repeat the affected runs")
+
+
+def _warn_if_cpu_limiting(run: Run) -> None:
+    problem = metrics.cpu_was_limiting(run)
+    if problem:
+        print(f"CPU NOT GENEROUS: {problem}. Raise generous_cpu_millicores in the profile and repeat the run.")
 
 
 def cmd_prototype(args: argparse.Namespace) -> None:
@@ -205,8 +219,7 @@ def cmd_prototype(args: argparse.Namespace) -> None:
     exp = Experiment(args)
     s = busiest_slice(exp.arrivals, days("day2", 2, 1), 7200.0, "proto")
     size = sizing.static_sizing(exp.demand(s).peaks)
-    g = exp.profile.generous
-    alloc = Allocation(min(size.cpu_millicores, g.cpu_millicores), min(size.memory_bytes, g.memory_bytes))
+    alloc = exp.allocation(min(size.memory_bytes, exp.profile.generous.memory_bytes))
     flags = config.vpa_flags(K, config.PROTOTYPE_FLAGS, restrict_to_declared=False)
     out = exp.run_dir("proto-prototype-r1", args.force)
     execute(exp.profile, exp.plan(s, replay_schedule(exp.arrivals, s), s.replay_duration_s(), out, "prototype", alloc,
@@ -228,6 +241,7 @@ def _gate(run_dir: Path) -> int:
     for c in checks:
         print(f"{'PASS' if c.passed else 'FAIL'}  {c.name}: {c.detail}")
     passed = all(c.passed for c in checks)
+    _warn_if_cpu_limiting(run)
     print("GATE PASSED" if passed else "GATE FAILED: no full run may start")
     return 0 if passed else 1
 
@@ -285,9 +299,9 @@ def cmd_tune_select(args: argparse.Namespace) -> None:
     candidates = []
     for r in iterations:
         w = metrics.summarize(r)["whole"]
-        candidates.append(decisions.Candidate(str(r.meta["label"]), w["alloc_cpu_m"], w["alloc_mem_bytes"], w["p99_s"],
+        candidates.append(decisions.Candidate(str(r.meta["label"]), w["alloc_mem_bytes"], w["p99_s"],
                                              w["oom_kills"] + w["container_restarts"]))  # any restart disqualifies, OOM or not
-    chosen, met = decisions.select_tuned(candidates, static_p99, static[0].initial)
+    chosen, met = decisions.select_tuned(candidates, static_p99)
     result = {"static_p99_s": static_p99, "candidates": [asdict(c) for c in candidates], "chosen": chosen.name, "constraint_met": met}
     print(json.dumps(result, indent=2))
     if not met:

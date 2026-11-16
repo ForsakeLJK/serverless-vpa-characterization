@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from vpaexp.metrics import oom_kill_times, summarize
+from vpaexp.metrics import cpu_was_limiting, oom_kill_times, summarize
 from vpaexp.records import load_run
 
 from .synthetic import MI, T0, audit_rec, audit_resize, audit_status, pod, res, scenario, write_run
@@ -32,18 +32,17 @@ def test_a_run_without_a_phase_boundary_reports_only_the_whole_run(tmp_path: Pat
 
 def test_allocation_is_the_time_weighted_mean_of_what_the_pod_was_given(tmp_path: Path) -> None:
     s = summarize(load_run(scenario(tmp_path)))
-    # 1000m until 22s, 2000m until 65s, 500m to the end
-    assert s["whole"]["alloc_cpu_m"] == pytest.approx(1255)
-    assert s["first_day"]["alloc_cpu_m"] == pytest.approx(1450)
-    assert s["warmed"]["alloc_cpu_m"] == pytest.approx(1125)
-    assert s["whole"]["alloc_mem_bytes"] == pytest.approx((1000 * 65 + 500 * 35) / 100 * MI)
+    # 1000 Mi until 22s, 2000 Mi until 65s, 500 Mi to the end
+    assert s["whole"]["alloc_mem_bytes"] == pytest.approx(1255 * MI)
+    assert s["first_day"]["alloc_mem_bytes"] == pytest.approx(1450 * MI)
+    assert s["warmed"]["alloc_mem_bytes"] == pytest.approx(1125 * MI)
 
 
 def test_utilization_is_usage_over_the_request_in_force(tmp_path: Path) -> None:
     s = summarize(load_run(scenario(tmp_path)))
-    # 0.5 cores against 1000m, then 2000m, then 500m
-    assert s["whole"]["util_cpu"] == pytest.approx((22 * 0.5 + 43 * 0.25 + 35 * 1.0) / 100, abs=0.01)
-    assert s["whole"]["usage_cpu_cores"] == pytest.approx(0.5)
+    # 500 Mi against 1000 Mi, then 2000 Mi, then 500 Mi
+    assert s["whole"]["util_mem"] == pytest.approx((22 * 0.5 + 43 * 0.25 + 35 * 1.0) / 100, abs=0.01)
+    assert s["whole"]["usage_mem_bytes"] == pytest.approx(500 * MI)
 
 
 def test_each_resize_carries_three_timestamps(tmp_path: Path) -> None:
@@ -55,12 +54,12 @@ def test_each_resize_carries_three_timestamps(tmp_path: Path) -> None:
     assert up.complete and down.complete
 
 
-def test_resizes_are_counted_by_resource_and_direction(tmp_path: Path) -> None:
+def test_resizes_are_counted_by_direction(tmp_path: Path) -> None:
     s = summarize(load_run(scenario(tmp_path)))
     w = s["whole"]
-    assert (w["resize_cpu_up"], w["resize_cpu_down"], w["resize_mem_up"], w["resize_mem_down"]) == (1, 1, 0, 1)
+    assert (w["resize_mem_up"], w["resize_mem_down"]) == (1, 1)
     assert w["resizes"] == 2
-    assert s["first_day"]["resizes"] == 1 and s["warmed"]["resize_cpu_down"] == 1
+    assert s["first_day"]["resizes"] == 1 and s["warmed"]["resize_mem_down"] == 1
 
 
 def test_a_resize_the_kubelet_deferred_is_counted_as_deferred(tmp_path: Path) -> None:
@@ -70,7 +69,7 @@ def test_a_resize_the_kubelet_deferred_is_counted_as_deferred(tmp_path: Path) ->
 
 
 def test_a_rejected_patch_and_a_never_applied_resize_both_count_as_failed(tmp_path: Path) -> None:
-    start, big = res(1000, 1000), res(9000, 1000)
+    start, big = res(1000), res(9000)
     d = write_run(
         tmp_path,
         client=[(1.0, 0.1, "ok")],
@@ -88,24 +87,31 @@ def test_a_rejected_patch_and_a_never_applied_resize_both_count_as_failed(tmp_pa
     assert w["resizes"] == 0 and w["resizes_failed_or_deferred"] == 2
 
 
-def test_oom_kills_and_throttling_come_from_the_cgroup_counters(tmp_path: Path) -> None:
+def test_oom_kills_come_from_the_cgroup_counter(tmp_path: Path) -> None:
     s = summarize(load_run(scenario(tmp_path)))
     assert s["whole"]["oom_kills"] == 1 and s["first_day"]["oom_kills"] == 0 and s["warmed"]["oom_kills"] == 1
-    assert s["whole"]["throttled_periods"] == 3
-    assert s["whole"]["throttled_s"] == pytest.approx(0.25)
+
+
+def test_cpu_is_not_a_result_but_throttling_flags_a_run_whose_cpu_was_not_generous(tmp_path: Path) -> None:
+    throttled = load_run(scenario(tmp_path / "a"))
+    whole = summarize(throttled)["whole"]
+    assert not any("cpu" in key and key != "cpu_throttled_s" for key in whole)
+    assert whole["cpu_throttled_s"] == pytest.approx(0.25)
+    assert cpu_was_limiting(throttled) == "CPU was throttled for 0.2s (0.2% of the run)"
+    quiet = write_run(tmp_path / "b", client=[(1.0, 0.1, "ok")], sampler=[(float(i), 0.1, 100.0, 0, 0, 0.0) for i in range(5)])
+    assert cpu_was_limiting(load_run(quiet)) is None
 
 
 def test_recommendation_series_is_read_from_the_vpa_watch(tmp_path: Path) -> None:
     recs = load_run(scenario(tmp_path)).recommendations
-    assert [(r.t - T0, r.target.cpu_millicores, r.lower.cpu_millicores, r.upper.cpu_millicores) for r in recs] == [
+    assert [(r.t - T0, r.target // MI, r.lower // MI, r.upper // MI) for r in recs] == [
         (10.0, 2000, 900, 4000),
         (58.0, 500, 400, 700),
     ]
-    assert recs[0].upper.memory_bytes == 2000 * MI
 
 
 def test_applied_time_comes_from_the_kubelets_status_write_when_the_audit_log_has_it(tmp_path: Path) -> None:
-    start, big = res(1000, 1000), res(2000, 1000)
+    start, big = res(1000), res(2000)
     d = write_run(
         tmp_path,
         client=[(1.0, 0.1, "ok")],
@@ -122,7 +128,7 @@ def test_applied_time_comes_from_the_kubelets_status_write_when_the_audit_log_ha
 
 
 def test_a_resize_is_not_applied_while_the_kubelet_still_reports_it_in_progress(tmp_path: Path) -> None:
-    start, big = res(1000, 1000), res(2000, 1000)
+    start, big = res(1000), res(2000)
     d = write_run(
         tmp_path,
         client=[(1.0, 0.1, "ok")],
@@ -140,7 +146,7 @@ def test_a_resize_is_not_applied_while_the_kubelet_still_reports_it_in_progress(
 def test_container_restarts_are_counted_and_flag_a_static_run(tmp_path: Path) -> None:
     from vpaexp.metrics import static_sizing_too_low
 
-    a = res(1000, 1000)
+    a = res(1000)
     d = write_run(
         tmp_path,
         client=[(1.0, 0.1, "ok")],
@@ -156,7 +162,7 @@ def test_container_restarts_are_counted_and_flag_a_static_run(tmp_path: Path) ->
 
 
 def test_audit_events_of_other_objects_on_the_cluster_are_ignored(tmp_path: Path) -> None:
-    start, big = res(1000, 1000), res(2000, 1000)
+    start, big = res(1000), res(2000)
     other = audit_rec(15.0, big)
     other["objectRef"]["name"] = "primes-vpa"
     d = write_run(
@@ -170,7 +176,7 @@ def test_audit_events_of_other_objects_on_the_cluster_are_ignored(tmp_path: Path
 
 
 def test_oom_kill_times_cover_kills_inside_the_container_and_of_the_container(tmp_path: Path) -> None:
-    a = res(1000, 1000)
+    a = res(1000)
     d = write_run(
         tmp_path,
         client=[(1.0, 0.1, "ok")],
@@ -181,7 +187,7 @@ def test_oom_kill_times_cover_kills_inside_the_container_and_of_the_container(tm
 
 
 def test_a_container_oom_kill_is_timed_at_the_kill_not_at_the_restart_after_back_off(tmp_path: Path) -> None:
-    a = res(1000, 1000)
+    a = res(1000)
     d = write_run(
         tmp_path,
         client=[(1.0, 0.1, "ok")],

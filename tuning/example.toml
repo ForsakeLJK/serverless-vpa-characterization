@@ -1,5 +1,5 @@
 # Example tuned configuration. Only the declared knobs (spec section 7) are accepted.
 # Values are the flags as passed to the components, so durations are already in replay time.
 [flags]
-cpu-histogram-decay-half-life = "1h0m0s"
+memory-histogram-decay-half-life = "1h0m0s"
 pod-recommendation-min-memory-mb = "50"

@@ -35,18 +35,14 @@ _UPDATER_DURATIONS = {
 }
 _UPDATER_VALUES = {"pod-update-threshold": "0.1"}
 
-# Section 7: the only flags hand-tuning may change.
+# Section 7: the only flags hand-tuning may change. VPA controls memory only, so no CPU flag is a knob.
 DECLARED_KNOBS = frozenset(
     {
-        "cpu-histogram-decay-half-life",
         "memory-histogram-decay-half-life",
         "memory-aggregation-interval",
-        "confidence-interval-cpu",
         "confidence-interval-memory",
-        "target-cpu-percentile",
         "target-memory-percentile",
         "recommendation-margin-fraction",
-        "pod-recommendation-min-cpu-millicores",
         "pod-recommendation-min-memory-mb",
         "in-recommendation-bounds-eviction-lifetime-threshold",
         "pod-update-threshold",
@@ -56,10 +52,8 @@ DECLARED_KNOBS = frozenset(
 # Section 11: windows far below the k=4 values so that resizes occur within 30 minutes.
 # Not subject to the declared-knob rule; the prototype only verifies the pipeline.
 PROTOTYPE_FLAGS = {
-    "cpu-histogram-decay-half-life": "2m0s",
     "memory-histogram-decay-half-life": "2m0s",
     "memory-aggregation-interval": "2m0s",
-    "confidence-interval-cpu": "2m0s",
     "confidence-interval-memory": "2m0s",
     "in-recommendation-bounds-eviction-lifetime-threshold": "1m0s",
     "evict-after-oom-threshold": "30s",
@@ -169,7 +163,8 @@ def service_manifest(namespace: str) -> dict[str, Any]:
     }
 
 
-def vpa_manifest(namespace: str, max_allowed: Allocation) -> dict[str, Any]:
+def vpa_manifest(namespace: str, max_memory_bytes: int) -> dict[str, Any]:
+    """VPA controls memory only (section 6.4); the pod's CPU stays at its fixed, generous value."""
     return {
         "apiVersion": "autoscaling.k8s.io/v1",
         "kind": "VerticalPodAutoscaler",
@@ -183,9 +178,9 @@ def vpa_manifest(namespace: str, max_allowed: Allocation) -> dict[str, Any]:
                 "containerPolicies": [
                     {
                         "containerName": APP,
-                        "controlledResources": ["cpu", "memory"],
+                        "controlledResources": ["memory"],
                         "controlledValues": "RequestsAndLimits",
-                        "maxAllowed": max_allowed.resources(),
+                        "maxAllowed": {"memory": f"{max_memory_bytes // MI}Mi"},
                     }
                 ]
             },

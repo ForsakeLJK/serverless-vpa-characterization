@@ -2,6 +2,8 @@
 
 Experiment harness for [docs/spec.md](docs/spec.md). Section numbers below refer to the spec.
 
+VPA controls memory only. The function's CPU is fixed in every run at `generous_cpu_millicores` from the cluster profile (`cluster/*.toml`), and no CPU metric is a result. A run that records any CPU throttling prints `CPU NOT GENEROUS`: raise that value and repeat the run.
+
 ## Layout
 
 | Path | What it is |
@@ -86,7 +88,7 @@ Global options go before the command name (`vpaexp --profile full run ...`).
 | Name | Required | Default | When to use | Meaning |
 |---|---|---|---|---|
 | `--window A\|B` | Yes | none | Always. Size each window once before its runs. | Which trace window to size: A is the 4 trace days from day offset 2, B the 4 from day offset 9. Each replays in 24h at `k = 4`. |
-| `--validate` | No | off | The normal path for the campaign. | Run the 1h validation replay around the calculated CPU peak, then save the sizing. Exits non-zero if measurement and calculation disagree by more than 10%. |
+| `--validate` | No | off | The normal path for the campaign. | Run the 1h validation replay around the calculated memory peak, then save the sizing. Exits non-zero if measurement and calculation disagree by more than 10%. |
 | `--full-profile` | No | off | When `--validate` fails, or a static run reports the sizing as too low. | Run a full 24h profiling replay and size from its measured peaks. |
 | `--write-unvalidated` | No | off | Smoke tests only. | Save the calculation alone, with no replay. `run` warns when it uses such a sizing. |
 | `--force` | No | off | When repeating a validation or profiling replay. | Replace the existing validation or profiling run directory. |
@@ -113,7 +115,7 @@ Each run writes a self-describing directory under `results/<profile>/runs/<windo
 |---|---|
 | `run.json` | Setting, window, flags, manifests, initial allocation, component versions and arguments |
 | `client.csv` | Per request: scheduled, sent, completed (epoch seconds), status |
-| `sampler.csv` | 1s cgroup samples: `cpu.stat`, `memory.current`, `memory.peak`, `memory.events` |
+| `sampler.csv` | 1s cgroup samples: `memory.current`, `memory.peak`, `memory.events`, and `cpu.stat` (used only to check that CPU was never throttled) |
 | `watch.jsonl` | Every change to the pod, the VPA object and events, stamped on receipt |
 | `audit.jsonl` | API server audit events for pod resizes and VPA status writes |
 | `summary.json` | Metrics for the whole run and per phase, and every resize with its timestamps |
@@ -136,9 +138,10 @@ Each iteration is a TOML file with a `[flags]` table (see `tuning/example.toml`)
 
 Places where the spec left a choice open; each is one function, easy to change.
 
-- **Validation replay and peaks (§6.1).** A window's peak concurrency and peak 15s CPU fall hours apart, so one 1h replay cannot contain both. The replay is centred on the calculated CPU peak and compared with the calculation for that same hour. Where it measures more than calculated, the window's calculated peak is raised by the same ratio (`sizing.static_sizing`).
-- **Selection rule (§7).** "Lowest mean allocated CPU and memory" is scored as CPU and memory each taken as a fraction of the static allocation, summed (`decisions.select_tuned`).
-- **H1 (§1).** A metric is beaten when the median improves by more than the larger of the two min-to-max spreads. H1 is supported if mean CPU allocation, mean memory allocation or p99 is beaten (`decisions.h1`).
+- **Fixed CPU (§6).** The spec asks for a generous value per testbed. It is `generous_cpu_millicores` in the profile; `size` warns if it is below one core per request at peak concurrency, and every run reports CPU throttling (`metrics.cpu_was_limiting`).
+- **Validation replay and peaks (§6.1).** The 1h replay is centred on the calculated memory peak and compared with the calculation for that same hour. Where it measures more than calculated, the window's calculated peak is raised by the same ratio (`sizing.static_sizing`).
+- **Selection rule (§7).** Lowest mean allocated memory among iterations with zero OOM kills and p99 within 1.1× static (`decisions.select_tuned`). The zero-OOM condition is under revision; see the spec.
+- **H1 (§1).** A metric is beaten when the median improves by more than the larger of the two min-to-max spreads. H1 is supported if mean memory allocation or p99 is beaten (`decisions.h1`).
 - **Recommendation timestamp (§8.1).** For a resize, "recommendation updated" is the first VPA status write in the latest unbroken run of writes carrying the value that was patched into the pod (`records._recommended_at`).
 - **Resize applied (§8.1).** A resize counts as applied at the kubelet's first status write that shows the new limits with no resize in progress. The time is taken from the audit log, so all three lag timestamps share the API server's clock; the watch recorder is the fallback.
 - **OOM kills and restarts.** An OOM that kills the whole container shows as a container restart, not in the container's `memory.events`. Restarts are counted per run (`container_restarts`), fail the static sizing check, and disqualify a tuning iteration like an OOM kill.
@@ -147,7 +150,9 @@ Places where the spec left a choice open; each is one function, easy to change.
 
 ## Not verified, and known gaps
 
-The prototype run on the minikube cluster passed the gate (§11), which exercised `cluster.py`, `run.py`, the image build, the collectors and the figures end to end. `scripts/setup-fullrun.sh` and the `full` profile have not been run.
+A prototype run on the minikube cluster passed the gate (§11) when VPA still controlled CPU and memory; it exercised `cluster.py`, `run.py`, the image build, the collectors and the figures end to end. The gate has not been re-run since the change to memory-only VPA, so the `controlledResources: ["memory"]` object and gate check 2 are untested against a cluster. `scripts/setup-fullrun.sh` and the `full` profile have not been run.
+
+- **The prototype VM cannot give generous CPU.** It has 4 vCPUs and the function gets 2.5, against a peak concurrency well above that, so prototype runs will report `CPU NOT GENEROUS`. That is acceptable for a pipeline check only.
 
 - **VPA 1.7.1 flag and field names** were accepted by the 1.7.1 recommender and updater in the prototype run.
 - **NUMA placement** on the full-run machine relies on systemd `CPUAffinity` for containerd and the kubelet. `setup-fullrun.sh` prints how to check it.
