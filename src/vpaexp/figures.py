@@ -49,13 +49,22 @@ def _mark_oom_kills(ax: Any, run: Run, unit: float) -> None:
             transform=ax.get_xaxis_transform(), label=f"OOM kill ({len(xs)})")
 
 
-def fig1_arrival_rate(run: Run, path: Path) -> Path:
+def fig1_throughput(run: Run, path: Path) -> Path:
+    """Offered load (requests scheduled) and achieved throughput (successful completions), per 1-minute bucket."""
     unit, xlabel = _axis(run)
-    edges = np.arange(0, run.duration_s + BUCKET_S, BUCKET_S)
-    counts, _ = np.histogram(run.client.scheduled - run.t0, edges)
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.step(edges[:-1] / unit, counts / BUCKET_S, where="post", lw=0.8)
-    ax.set(xlabel=xlabel, ylabel="arrival rate (rps, 1-min buckets)", title=f"Arrivals, window {run.meta.get('window')}")
+    edges = _buckets(run)
+    c = run.client
+    offered, _ = np.histogram(c.scheduled - run.t0, edges)
+    achieved, _ = np.histogram(c.completed[c.status == "ok"] - run.t0, edges)
+    mid = (edges[:-1] + BUCKET_S / 2) / unit
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    ax.plot(mid, offered / BUCKET_S, lw=1.1, color="0.35", label="offered load")
+    ax.plot(mid, achieved / BUCKET_S, lw=1.1, color=OK, label="achieved throughput (successful)")
+    _mark_oom_kills(ax, run, unit)
+    ax.set_ylim(0, 1.25 * max(float(np.max(offered, initial=1)), float(np.max(achieved, initial=1))) / BUCKET_S)
+    ax.set(xlabel=xlabel, ylabel="requests per second (1-min buckets)",
+           title=f"Throughput: {run.meta.get('setting')}, window {run.meta.get('window')}")
+    ax.legend(fontsize=7, loc="upper right", ncols=3)
     return _save(fig, path)
 
 
@@ -218,17 +227,17 @@ def overview(panels: list[Path], path: Path, title: str) -> Path:
 def run_figures(run: Run, out_dir: Path) -> list[Path]:
     """Figures 1-6 for one run, then an overview page with all of them together."""
     panels = [
-        fig1_arrival_rate(run, out_dir / "fig1-arrival-rate.png"),
+        fig1_throughput(run, out_dir / "fig1-throughput.png"),
         fig2_memory(run, out_dir / "fig2-memory.png"),
         fig3_memory_utilization(run, out_dir / "fig3-memory-utilization.png"),
         fig4_latency(run, out_dir / "fig4-latency.png"),
         fig5_outcomes(run, out_dir / "fig5-outcomes.png"),
         fig6_lag(run, out_dir / "fig6-lag.png"),
     ]
-    arrivals, memory, utilization, latency, outcomes, lag = panels
+    throughput, memory, utilization, latency, outcomes, lag = panels
     title = f"{run.meta.get('setting')}, window {run.meta.get('window')}, {run.path.name}"
     # On the overview, memory sits beside its utilization.
-    rows = [arrivals, outcomes, memory, utilization, latency, lag]
+    rows = [throughput, outcomes, memory, utilization, latency, lag]
     return panels + [overview(rows, out_dir / "overview.png", title)]
 
 

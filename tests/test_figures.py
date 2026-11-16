@@ -12,6 +12,7 @@ def test_figures_1_to_6_render_from_a_collected_run(tmp_path: Path) -> None:
     paths = run_figures(run, tmp_path / "figs")
     assert [p.name for p in paths][-1] == "overview.png" and len(paths) == 7
     assert not any("cpu" in p.name for p in paths)
+    assert paths[0].name == "fig1-throughput.png"
     assert all(p.stat().st_size > 5_000 for p in paths)
 
 

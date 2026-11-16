@@ -269,7 +269,7 @@ One 30-minute run on the Mac minikube cluster. The prototype only verifies the p
 
 ## 12. Figures
 
-1. Arrival rate over time for the window.
+1. Server throughput over time as a line chart with two lines per 1-minute bucket: offered load (the request rate of the load) and achieved throughput (the rate of successful requests).
 2. Memory over time: usage, request, VPA target with lower and upper bounds.
 3. Memory utilization over time: usage in percent of the allocation in force.
 4. Latency over time as a line chart (p50, p95 and p99 per 1-minute bucket) with resize events marked.
