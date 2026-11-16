@@ -8,26 +8,39 @@ from vpaexp.records import load_run
 
 from .synthetic import MI, audit_rec, audit_resize, pod, res, scenario, write_run
 
-def cand(name: str, mem_mi: float, p99: float, ooms: int = 0) -> Candidate:
-    return Candidate(name, mem_mi * MI, p99, ooms)
+def cand(name: str, mem_mi: float, p99: float = 0.40, failed: float = 0.0, ooms: int = 0) -> Candidate:
+    return Candidate(name, mem_mi * MI, p99, failed, ooms)
 
 
-def test_tuned_is_the_cheapest_iteration_that_keeps_p99_within_1_1x_static_and_has_no_ooms() -> None:
-    chosen, met = select_tuned(
-        [
-            cand("it1", 300, p99=0.50),  # cheapest, but p99 above 1.1 x 0.4
-            cand("it2", 350, p99=0.44, ooms=1),  # OOM kill
-            cand("it3", 400, p99=0.44),
-            cand("it4", 600, p99=0.40),
-        ],
-        static_p99_s=0.4,
-    )
-    assert (chosen.name, met) == ("it3", True)
+def pick(candidates: list[Candidate], static_failed: float = 0.0) -> tuple[str, bool]:
+    chosen, kept = select_tuned(candidates, static_p99_s=0.4, static_failed_rate=static_failed)
+    return chosen.name, kept
 
 
-def test_when_no_iteration_meets_the_constraint_the_lowest_p99_wins_and_it_is_reported() -> None:
-    chosen, met = select_tuned([cand("it1", 300, 0.9), cand("it2", 300, 0.6, ooms=2)], 0.4)
-    assert (chosen.name, met) == ("it2", False)
+def test_tuned_is_the_iteration_with_the_least_memory_that_keeps_service_quality() -> None:
+    assert pick([
+        cand("it1", 300, p99=0.50),  # least memory, but p99 above 1.1 x 0.4
+        cand("it2", 350, failed=0.02),  # too many failed requests
+        cand("it3", 400, p99=0.44),
+        cand("it4", 600),
+    ]) == ("it3", True)
+
+
+def test_oom_kills_do_not_disqualify_an_iteration_that_keeps_service_quality() -> None:
+    assert pick([cand("it1", 400, ooms=3), cand("it2", 900)]) == ("it1", True)
+
+
+def test_failed_requests_are_judged_against_the_static_run_with_half_a_point_of_allowance() -> None:
+    assert pick([cand("it1", 400, failed=0.014), cand("it2", 900)], static_failed=0.01) == ("it1", True)
+    assert pick([cand("it1", 400, failed=0.016), cand("it2", 900)], static_failed=0.01) == ("it2", True)
+
+
+def test_among_iterations_within_5_percent_on_memory_the_fewest_oom_kills_wins() -> None:
+    assert pick([cand("it1", 400, ooms=4), cand("it2", 415, ooms=1), cand("it3", 430, ooms=0)]) == ("it2", True)
+
+
+def test_when_no_iteration_keeps_service_quality_the_fewest_failed_requests_wins_and_it_is_reported() -> None:
+    assert pick([cand("it1", 300, p99=0.9, failed=0.05), cand("it2", 300, p99=0.6, failed=0.02)]) == ("it2", False)
 
 
 def reps(mem: list[float], p99: list[float]) -> list[dict[str, float]]:

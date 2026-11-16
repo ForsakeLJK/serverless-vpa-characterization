@@ -295,17 +295,20 @@ def cmd_tune_select(args: argparse.Namespace) -> None:
     iterations = [r for r in exp.runs("A", "tuned") if re.fullmatch(r"it\d+", str(r.meta.get("label", "")))]
     if not static or not iterations:
         sys.exit("need at least one full static run and one tuning iteration (--setting tuned --label itN) on window A")
-    static_p99 = float(np.median([metrics.summarize(r)["whole"]["p99_s"] for r in static]))
+    static_whole = [metrics.summarize(r)["whole"] for r in static]
+    static_p99 = float(np.median([w["p99_s"] for w in static_whole]))
+    static_failed = float(np.median([w["timeout_rate"] + w["error_rate"] for w in static_whole]))
     candidates = []
     for r in iterations:
         w = metrics.summarize(r)["whole"]
         candidates.append(decisions.Candidate(str(r.meta["label"]), w["alloc_mem_bytes"], w["p99_s"],
-                                             w["oom_kills"] + w["container_restarts"]))  # any restart disqualifies, OOM or not
-    chosen, met = decisions.select_tuned(candidates, static_p99)
-    result = {"static_p99_s": static_p99, "candidates": [asdict(c) for c in candidates], "chosen": chosen.name, "constraint_met": met}
+                                             w["timeout_rate"] + w["error_rate"], w["oom_kills"]))
+    chosen, met = decisions.select_tuned(candidates, static_p99, static_failed)
+    result = {"static_p99_s": static_p99, "static_failed_rate": static_failed, "candidates": [asdict(c) for c in candidates], "chosen": chosen.name, "constraint_met": met}
     print(json.dumps(result, indent=2))
     if not met:
-        print("CONSTRAINT UNMET: no iteration had zero OOM kills and p99 within 1.1x static; lowest p99 chosen. Report this.")
+        print("SERVICE QUALITY NOT KEPT by any iteration (p99 within 1.1x static, failed requests within 0.5 points of static); "
+              "the one with the fewest failed requests was chosen. Report this.")
     _write(exp.root / "report" / "tuning-selection.json", result)
 
 

@@ -140,11 +140,11 @@ Places where the spec left a choice open; each is one function, easy to change.
 
 - **Fixed CPU (§6).** The spec asks for a generous value per testbed. It is `generous_cpu_millicores` in the profile; `size` warns if it is below one core per request at peak concurrency, and every run reports CPU throttling (`metrics.cpu_was_limiting`).
 - **Validation replay and peaks (§6.1).** The 1h replay is centred on the calculated memory peak and compared with the calculation for that same hour. Where it measures more than calculated, the window's calculated peak is raised by the same ratio (`sizing.static_sizing`).
-- **Selection rule (§7).** Lowest mean allocated memory among iterations with zero OOM kills and p99 within 1.1× static (`decisions.select_tuned`). The zero-OOM condition is under revision; see the spec.
+- **Selection rule (§7).** The static p99 and failed-request rate are the medians over the static repetitions on window A. An iteration's OOM kills include OOM kills of the whole container (`decisions.select_tuned`).
 - **H1 (§1).** A metric is beaten when the median improves by more than the larger of the two min-to-max spreads. H1 is supported if mean memory allocation or p99 is beaten (`decisions.h1`).
 - **Recommendation timestamp (§8.1).** For a resize, "recommendation updated" is the first VPA status write in the latest unbroken run of writes carrying the value that was patched into the pod (`records._recommended_at`).
 - **Resize applied (§8.1).** A resize counts as applied at the kubelet's first status write that shows the new limits with no resize in progress. The time is taken from the audit log, so all three lag timestamps share the API server's clock; the watch recorder is the fallback.
-- **OOM kills and restarts.** An OOM that kills the whole container shows as a container restart, not in the container's `memory.events`. Restarts are counted per run (`container_restarts`), fail the static sizing check, and disqualify a tuning iteration like an OOM kill.
+- **OOM kills and restarts.** An OOM that kills the whole container shows as a container restart, not in the container's `memory.events`. Restarts are counted per run (`container_restarts`) and fail the static sizing check; those caused by an OOM are added to the run's OOM kills.
 - **`minReplicas: 1` on the VPA object.** The updater ignores workloads with fewer replicas than its `--min-replicas` (default 2). The per-object override is set so that it acts on the single pod; no component flag changes.
 - **Latency of failed requests.** Timeouts count at the timeout value (§8.1). Requests with status `error` are excluded from latency and reported in the error rate.
 

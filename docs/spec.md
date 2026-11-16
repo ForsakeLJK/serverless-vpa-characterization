@@ -195,7 +195,12 @@ Guardrails:
 - **Declared knobs**: memory half-life, memory aggregation interval, memory confidence interval, memory target percentile, safety margin, the 250Mi floor, in-bounds lifetime threshold, update threshold. No CPU flag is a knob. Nothing else may change. Loop intervals are excluded, since 15s is already the practical floor.
 - **Tuning log**: each iteration records the observation, the knob changed and why, and the result. The log is a paper artifact (figure 9).
 - **Budget**: 3 iterations to start. It may be raised later if the log shows continued improvement.
-- **Selection rule**, fixed before any tuning run: the tuned configuration is the iteration with the lowest mean allocated memory that has zero OOM kills and p99 latency no worse than 1.1× the static p99. If no iteration meets the constraint, take the one with the lowest p99 and report that the constraint was unmet. **[open]** The zero-OOM condition is under revision: it is too strict for a VPA that shrinks memory in place, and a replacement based on how closely the allocation tracks memory demand is being discussed. The rule must be settled before the first tuning run.
+- **Selection rule**, fixed before any tuning run. The goal of tuning is to avoid memory waste while keeping service quality.
+  - **Service quality is kept** when both hold: p99 latency is no worse than 1.1× the static p99, and the failed-request rate (timeouts plus errors) is no more than 0.5 percentage points above the static run's. The second condition is needed because errors are not part of the latency percentiles.
+  - **The tuned configuration** is the iteration with the lowest mean allocated memory among those that keep service quality.
+  - **OOM kills are expected to be few, not zero.** They do not disqualify an iteration; their cost to users is already limited by the two conditions above. Iterations whose mean allocated memory is within 5% of the lowest count as equal on memory, and among them the one with the fewest OOM kills is chosen.
+  - If no iteration keeps service quality, take the one with the fewest failed requests and report that service quality was not kept.
+  - The 0.5 points and the 5% are judgment calls **[verify]**.
 
 An alternative ordering of the stages is recorded in Appendix A as an open question.
 
@@ -333,5 +338,5 @@ Status: an open thought from the experimenter, to be discussed with collaborator
 - **What the time saving is.** The stages are the same; the saving comes from getting a tuned result earlier, and from possibly needing fewer tuning iterations if the static run gives enough information to pick a configuration directly.
 - **Effect on H1.** The hypothesis compares tuned with default, so default runs are still needed before H1 can be tested. Running default last delays that test but does not remove it.
 - **Effect on the tuning log.** The log currently records "what default got wrong, which knob fixed it". Under this order the rationale becomes "what the workload looks like, which configuration fits it". Both are hand-tuning, but they tell different stories about how much effort tuning takes.
-- **Selection rule.** The rule in section 7 depends only on static p99, memory allocation and OOM kills, so it works unchanged in this order.
+- **Selection rule.** The rule in section 7 depends only on the static run's p99 and failed-request rate, and on each iteration's memory allocation and OOM kills, so it works unchanged in this order.
 - **Risk.** A configuration chosen without seeing default may fix problems default does not have, or miss ones it does.
