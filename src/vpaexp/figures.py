@@ -11,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from vpaexp.metrics import Summary, aggregate, allocation_steps, latencies, oom_kill_times
+from vpaexp.metrics import Summary, aggregate, allocation_steps, latencies, oom_kill_times, utilization
 from vpaexp.records import Recommendation, Resize, Run
 from vpaexp.sizing import MI
 from vpaexp.trace import Floats
@@ -99,6 +99,42 @@ def fig2_cpu(run: Run, path: Path) -> Path:
 
 def fig3_memory(run: Run, path: Path) -> Path:
     return _resource_figure(run, path, "memory")
+
+
+def _utilization_figure(run: Run, path: Path, resource: str) -> Path:
+    """Usage as a percentage of the allocation in force: every 1s sample, and the 1-minute mean."""
+    unit, xlabel = _axis(run)
+    cpu = resource == "cpu"
+    percent = 100 * utilization(run)[0 if cpu else 1]
+    t = run.samples.t - run.t0
+    edges = _buckets(run)
+    bucket = np.digitize(t, edges) - 1
+    mean = np.full(len(edges) - 1, np.nan)
+    for b in np.unique(bucket[(bucket >= 0) & (bucket < len(edges) - 1)]):
+        mean[b] = np.mean(percent[bucket == b])
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    ax.plot(t / unit, percent, lw=0.4, color="C0", alpha=0.45, label="1s samples")
+    ax.step(edges / unit, np.append(mean, mean[-1:]), where="post", lw=1.3, color="C0", label="1-min mean")
+    ax.axhline(100, color="0.4", lw=0.7, ls="--", label="allocation")
+    _mark_resizes(ax, run, unit)
+    _mark_oom_kills(ax, run, unit)
+    overall = float(np.mean(percent)) if len(percent) else float("nan")
+    # A sample that straddles a resize can read far above 100% of the new, smaller allocation;
+    # the axis stops at 150% so that those few samples do not flatten everything else.
+    ax.set_ylim(0, 150)
+    ax.set(xlabel=xlabel, ylabel=f"{'CPU' if cpu else 'memory'} utilization (% of allocation)",
+           title=f"{'CPU' if cpu else 'Memory'} utilization: {run.meta.get('setting')}, "
+                 f"window {run.meta.get('window')} (mean {overall:.0f}%)")
+    ax.legend(fontsize=7, loc="upper right", ncols=5)
+    return _save(fig, path)
+
+
+def fig2b_cpu_utilization(run: Run, path: Path) -> Path:
+    return _utilization_figure(run, path, "cpu")
+
+
+def fig3b_memory_utilization(run: Run, path: Path) -> Path:
+    return _utilization_figure(run, path, "memory")
 
 
 def _buckets(run: Run) -> Floats:
@@ -204,17 +240,20 @@ def overview(panels: list[Path], path: Path, title: str) -> Path:
 
 
 def run_figures(run: Run, out_dir: Path) -> list[Path]:
-    """Figures 1-6 for one run, then an overview page with all six together."""
-    panels = [
-        fig1_arrival_rate(run, out_dir / "fig1-arrival-rate.png"),
-        fig2_cpu(run, out_dir / "fig2-cpu.png"),
-        fig3_memory(run, out_dir / "fig3-memory.png"),
-        fig4_latency(run, out_dir / "fig4-latency.png"),
-        fig5_outcomes(run, out_dir / "fig5-outcomes.png"),
-        fig6_lag(run, out_dir / "fig6-lag.png"),
-    ]
+    """Figures 1-6 for one run (with 2b and 3b), then an overview page with all of them together."""
+    arrivals = fig1_arrival_rate(run, out_dir / "fig1-arrival-rate.png")
+    cpu = fig2_cpu(run, out_dir / "fig2-cpu.png")
+    cpu_util = fig2b_cpu_utilization(run, out_dir / "fig2b-cpu-utilization.png")
+    memory = fig3_memory(run, out_dir / "fig3-memory.png")
+    memory_util = fig3b_memory_utilization(run, out_dir / "fig3b-memory-utilization.png")
+    latency = fig4_latency(run, out_dir / "fig4-latency.png")
+    outcomes = fig5_outcomes(run, out_dir / "fig5-outcomes.png")
+    lag = fig6_lag(run, out_dir / "fig6-lag.png")
     title = f"{run.meta.get('setting')}, window {run.meta.get('window')}, {run.path.name}"
-    return panels + [overview(panels, out_dir / "overview.png", title)]
+    # On the overview each resource sits beside its utilization.
+    rows = [arrivals, outcomes, cpu, cpu_util, memory, memory_util, latency, lag]
+    return [arrivals, cpu, cpu_util, memory, memory_util, latency, outcomes, lag,
+            overview(rows, out_dir / "overview.png", title)]
 
 
 SUMMARY_PANELS = [

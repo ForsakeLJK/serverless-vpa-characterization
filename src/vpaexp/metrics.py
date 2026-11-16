@@ -48,6 +48,14 @@ def _step_mean(times: Floats, values: Floats, a: float, b: float) -> float:
     return float(np.sum(values * np.diff(edges)) / (b - a))
 
 
+def utilization(run: Run) -> tuple[Floats, Floats]:
+    """(CPU, memory) usage as a fraction of the allocation in force, for every 1s sample."""
+    s = run.samples
+    times, cpu_m, mem = allocation_steps(run)
+    mid = s.t - 0.5  # a sample covers the second before it
+    return s.cpu_cores / (_step_at(times, cpu_m, mid) / 1000), s.memory_bytes / _step_at(times, mem, mid)
+
+
 def latencies(run: Run) -> tuple[Floats, Floats]:
     """(scheduled time, latency) of every request that is not an error; timeouts count at the timeout value."""
     c = run.client
@@ -93,11 +101,11 @@ def _summarize(run: Run, a: float, b: float) -> Summary:
     out["alloc_mem_bytes"] = _step_mean(times, mem, a, b)
 
     m = (s.t > a) & (s.t <= b)
-    mid = s.t[m] - 0.5
     out["usage_cpu_cores"] = _mean(s.cpu_cores[m])
     out["usage_mem_bytes"] = _mean(s.memory_bytes[m])
-    out["util_cpu"] = _mean(s.cpu_cores[m] / (_step_at(times, cpu_m, mid) / 1000))
-    out["util_mem"] = _mean(s.memory_bytes[m] / _step_at(times, mem, mid))
+    util_cpu, util_mem = utilization(run)
+    out["util_cpu"] = _mean(util_cpu[m])
+    out["util_mem"] = _mean(util_mem[m])
     out["oom_kills"] = float(np.sum(s.oom_kills[m]))
     out["throttled_periods"] = float(np.sum(s.throttled_periods[m]))
     out["throttled_s"] = float(np.sum(s.throttled_s[m]))

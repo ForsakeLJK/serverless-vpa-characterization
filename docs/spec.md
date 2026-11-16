@@ -266,7 +266,7 @@ One 30-minute run on the Mac minikube cluster. The prototype only verifies the p
 5. Request outcomes over time: requests per 1-minute bucket that completed, timed out or errored, stacked.
 6. Lag breakdown per resize as a stacked bar: recommendation updated to pod patched, pod patched to kubelet applied.
 
-Figures 2–5 mark every OOM kill. Figures are rendered at 300 dpi.
+Figures 2 and 3 each have a companion (2b, 3b): utilization over time, as usage in percent of the allocation in force. Figures 2–5, 2b and 3b mark every OOM kill. Figures are rendered at 300 dpi, and every run also gets an overview page with all of its figures together.
 7. Summary bars with median and range over repetitions, for the whole run and per phase: p99, throughput, error rate, mean allocated CPU and memory, mean utilization, resize count, failed or deferred resizes, OOM kills, throttled time.
 8. Transfer: figure 7 for window B.
 9. Tuning log table: iteration, observation, knob changed, result.
