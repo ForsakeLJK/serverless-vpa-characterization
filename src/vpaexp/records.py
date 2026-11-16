@@ -56,6 +56,7 @@ class PodState:
     conditions: tuple[tuple[str, str], ...]  # (type, reason) of conditions that are True
     restarts: int
     last_exit: str = ""  # why the previous container instance ended, e.g. OOMKilled
+    last_exit_t: float | None = None  # when it ended (the kubelet's finishedAt, whole seconds)
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,7 @@ def _pod_state(record: dict[str, Any]) -> PodState:
     obj = record["object"]
     status = obj.get("status", {})
     cs = _container(status.get("containerStatuses"))
+    last = cs.get("lastState", {}).get("terminated", {})
     return PodState(
         t=record["t"],
         spec=_allocation(_container(obj.get("spec", {}).get("containers")).get("resources", {}).get("requests")),
@@ -191,7 +193,8 @@ def _pod_state(record: dict[str, Any]) -> PodState:
             (c["type"], c.get("reason", "")) for c in status.get("conditions", []) if c.get("status") == "True"
         ),
         restarts=int(cs.get("restartCount", 0)),
-        last_exit=str(cs.get("lastState", {}).get("terminated", {}).get("reason", "")),
+        last_exit=str(last.get("reason", "")),
+        last_exit_t=datetime.fromisoformat(last["finishedAt"]).timestamp() if last.get("finishedAt") else None,
     )
 
 

@@ -65,13 +65,17 @@ def latencies(run: Run) -> tuple[Floats, Floats]:
 
 
 def oom_kill_times(run: Run) -> Floats:
-    """When each OOM kill was observed: kills inside the container, and OOM kills of the container itself."""
+    """When each OOM kill happened: kills inside the container, and OOM kills of the container itself.
+
+    A container-level kill is timed by the kubelet's finishedAt. The restart count only goes up
+    once the container is started again, which is later by the restart back-off.
+    """
     s = run.samples
     times: list[float] = np.repeat(s.t, s.oom_kills.astype(int)).tolist()
     seen = 0
     for p in run.pods:
         if p.restarts > seen:
-            times += [p.t] * ((p.restarts - seen) if p.last_exit == "OOMKilled" else 0)
+            times += [p.last_exit_t or p.t] * ((p.restarts - seen) if p.last_exit == "OOMKilled" else 0)
             seen = p.restarts
     return np.array(sorted(times), dtype=np.float64)
 

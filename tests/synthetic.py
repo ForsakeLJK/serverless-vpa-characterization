@@ -16,7 +16,10 @@ def res(cpu_m: int, mem_mi: int) -> dict[str, str]:
 
 
 def pod(t: float, spec: dict[str, str], status: dict[str, str], conditions: list[dict[str, str]] | None = None,
-        restarts: int = 0, last_exit: str = "") -> dict[str, Any]:
+        restarts: int = 0, last_exit: str = "", exited_at: float | None = None) -> dict[str, Any]:
+    terminated: dict[str, Any] = {"reason": last_exit}
+    if exited_at is not None:
+        terminated["finishedAt"] = datetime.fromtimestamp(T0 + exited_at, UTC).isoformat()
     return {
         "t": T0 + t,
         "kind": "pod",
@@ -28,7 +31,7 @@ def pod(t: float, spec: dict[str, str], status: dict[str, str], conditions: list
                 "conditions": [{"type": "Ready", "status": "True"}] + (conditions or []),
                 "containerStatuses": [
                     {"name": "function", "restartCount": restarts,
-                     "lastState": {"terminated": {"reason": last_exit}} if last_exit else {}, "resources": {"requests": status, "limits": status}}
+                     "lastState": {"terminated": terminated} if last_exit else {}, "resources": {"requests": status, "limits": status}}
                 ],
             },
         },

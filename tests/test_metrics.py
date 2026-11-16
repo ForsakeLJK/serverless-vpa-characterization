@@ -178,3 +178,14 @@ def test_oom_kill_times_cover_kills_inside_the_container_and_of_the_container(tm
         pods=[pod(0.0, a, a), pod(50.0, a, a, restarts=1, last_exit="OOMKilled"), pod(70.0, a, a, restarts=2, last_exit="Error")],
     )
     assert list(oom_kill_times(load_run(d)) - T0) == [20.0, 50.0]
+
+
+def test_a_container_oom_kill_is_timed_at_the_kill_not_at_the_restart_after_back_off(tmp_path: Path) -> None:
+    a = res(1000, 1000)
+    d = write_run(
+        tmp_path,
+        client=[(1.0, 0.1, "ok")],
+        sampler=[(float(i), 0.1, 100.0, 0, 0, 0.0) for i in range(30)],
+        pods=[pod(0.0, a, a), pod(65.0, a, a, restarts=1, last_exit="OOMKilled", exited_at=50.0)],
+    )
+    assert list(oom_kill_times(load_run(d)) - T0) == [50.0]
