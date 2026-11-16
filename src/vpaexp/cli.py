@@ -194,6 +194,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     execute(exp.profile, plan)
     run = load_run(out)
     print(json.dumps(metrics.summarize(run)["whole"], indent=2))
+    print(figures.run_figures(run, out / "figures")[-1])
     if args.setting == "static" and not args.limit_s:
         for problem in metrics.static_sizing_too_low(run):
             print(f"SIZING TOO LOW ({problem}): redo sizing with --full-profile and repeat the affected runs")
@@ -339,7 +340,7 @@ def main() -> None:
     c = command("gate", cmd_gate, "evaluate the five prototype gate checks on a run directory")
     c.add_argument("run_dir")
 
-    c = command("figures", cmd_figures, "render figures 1-6 for a run directory")
+    c = command("figures", cmd_figures, "render figures 1-6 and the overview page for a run directory")
     c.add_argument("run_dir")
 
     c = command("report", cmd_report, "summary figure (7 or 8) and H1 for a window")

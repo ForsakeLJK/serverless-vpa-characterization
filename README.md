@@ -121,7 +121,7 @@ Each run writes a self-describing directory under `results/<profile>/runs/<windo
 Bring `results/full/` back from the server; analysis runs anywhere:
 
 ```bash
-uv run vpaexp figures results/full/runs/A-default-r1       # figures 1-6
+uv run vpaexp figures results/full/runs/A-default-r1       # re-render figures 1-6 and overview.png (every run renders them itself)
 uv run vpaexp --profile full tune-select                   # selection rule over it1, it2, ...
 uv run vpaexp --profile full report --window A             # figure 7, H1
 uv run vpaexp --profile full report --window B             # figure 8

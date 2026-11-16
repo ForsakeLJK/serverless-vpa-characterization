@@ -187,9 +187,25 @@ def fig6_lag(run: Run, path: Path) -> Path:
     return _save(fig, path)
 
 
+def overview(panels: list[Path], path: Path, title: str) -> Path:
+    """All of a run's figures on one page, two per row, composed from the rendered files."""
+    rows = (len(panels) + 1) // 2
+    fig, axes = plt.subplots(rows, 2, figsize=(16, 3.6 * rows + 0.4))
+    for ax in axes.flat:
+        ax.axis("off")
+    for ax, panel in zip(axes.flat, panels):
+        ax.imshow(plt.imread(panel), interpolation="lanczos")
+    fig.suptitle(title, fontsize=13)
+    fig.subplots_adjust(left=0, right=1, bottom=0, top=1 - 0.4 / (3.6 * rows + 0.4), wspace=0, hspace=0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=DPI)
+    plt.close(fig)
+    return path
+
+
 def run_figures(run: Run, out_dir: Path) -> list[Path]:
-    """Figures 1-6 for one run."""
-    return [
+    """Figures 1-6 for one run, then an overview page with all six together."""
+    panels = [
         fig1_arrival_rate(run, out_dir / "fig1-arrival-rate.png"),
         fig2_cpu(run, out_dir / "fig2-cpu.png"),
         fig3_memory(run, out_dir / "fig3-memory.png"),
@@ -197,6 +213,8 @@ def run_figures(run: Run, out_dir: Path) -> list[Path]:
         fig5_outcomes(run, out_dir / "fig5-outcomes.png"),
         fig6_lag(run, out_dir / "fig6-lag.png"),
     ]
+    title = f"{run.meta.get('setting')}, window {run.meta.get('window')}, {run.path.name}"
+    return panels + [overview(panels, out_dir / "overview.png", title)]
 
 
 SUMMARY_PANELS = [

@@ -10,13 +10,13 @@ from .synthetic import scenario, write_run
 def test_figures_1_to_6_render_from_a_collected_run(tmp_path: Path) -> None:
     run = load_run(scenario(tmp_path / "run"))
     paths = run_figures(run, tmp_path / "figs")
-    assert len(paths) == 6
+    assert [p.name for p in paths][-1] == "overview.png" and len(paths) == 7
     assert all(p.stat().st_size > 5_000 for p in paths)
 
 
 def test_figures_render_for_a_static_run_with_no_vpa_data(tmp_path: Path) -> None:
     d = write_run(tmp_path / "run", client=[(1.0, 0.1, "ok")], sampler=[(float(i), 0.2, 50.0, 0, 0, 0.0) for i in range(5)])
-    assert len(run_figures(load_run(d), tmp_path / "figs")) == 6
+    assert len(run_figures(load_run(d), tmp_path / "figs")) == 7
 
 
 def test_summary_and_tuning_log_figures_render(tmp_path: Path) -> None:
