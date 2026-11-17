@@ -30,7 +30,11 @@ curl -fsSL "https://pkgs.k8s.io/core:/stable:/$K8S_MINOR/deb/Release.key" | sudo
 echo "deb [signed-by=/etc/apt/keyrings/kubernetes.gpg] https://pkgs.k8s.io/core:/stable:/$K8S_MINOR/deb/ /" \
   | sudo tee /etc/apt/sources.list.d/kubernetes.list >/dev/null
 sudo apt-get update
-sudo apt-get install -y kubelet kubeadm kubectl
+# Pin the packages to K8S_VERSION: the repo also carries later patch releases, and a kubelet
+# newer than the control plane fails kubeadm's preflight.
+PKG_VERSION="${K8S_VERSION#v}-*"
+sudo apt-get install -y --allow-downgrades --allow-change-held-packages \
+  "kubelet=$PKG_VERSION" "kubeadm=$PKG_VERSION" "kubectl=$PKG_VERSION"
 sudo apt-mark hold kubelet kubeadm kubectl
 
 echo "== NUMA placement: kubelet, containerd and everything they start on node 0 ($NODE0_CPUS)"

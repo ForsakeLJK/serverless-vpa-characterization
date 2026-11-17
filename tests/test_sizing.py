@@ -28,6 +28,14 @@ def test_the_validation_hour_is_centred_on_the_peak_and_stays_inside_the_window(
     assert late.trace_start_s + late.trace_duration_s == window.trace_start_s + window.trace_duration_s
 
 
+def test_when_the_window_replays_in_an_hour_the_validation_slice_is_the_whole_window() -> None:
+    window = WINDOWS["A"]  # replays in 1h at k = 96
+    for peak_at_s in (0.0, 1800.0, 3500.0):
+        s = validation_slice(window, peak_at_s, k=96)
+        assert (s.trace_start_s, s.trace_duration_s) == (window.trace_start_s, window.trace_duration_s)
+        assert s.replay_duration_s(96) == 3600
+
+
 def test_static_memory_adds_15_percent_and_concurrency_is_capped_at_4x_peak() -> None:
     s = static_sizing(Peaks(concurrency=10, memory_bytes=400 * MB))
     assert s.memory_bytes == 460 * MB

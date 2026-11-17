@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 from typing import Any
 
 MI = 1024 * 1024
@@ -11,7 +12,13 @@ FUNCTION_PORT = 8080
 HEALTH_PORT = 8081
 NODE_PORT = 30080
 
-# Upstream defaults. Durations in seconds; these are divided by k.
+# metrics-server --metric-resolution (scripts/install-components.sh). It cannot usefully go lower
+# (section 6.2), so it is not scaled, and it is the floor for VPA's loop intervals at any k.
+METRICS_RESOLUTION_S = 15
+# Polling loops: running them faster than the metrics refresh only re-reads the same sample.
+LOOP_INTERVALS = frozenset({"recommender-interval", "updater-interval"})
+
+# Upstream defaults. Durations in seconds; these are divided by k (scaled_duration_s).
 _RECOMMENDER_DURATIONS = {
     "cpu-histogram-decay-half-life": 24 * 3600,
     "memory-histogram-decay-half-life": 24 * 3600,
@@ -68,6 +75,9 @@ class UndeclaredKnob(ValueError):
 class VpaFlags:
     recommender: dict[str, str]
     updater: dict[str, str]
+    # Scaled flags whose value is not exactly upstream / k: {flag: {exact_s, used_s, reason}}.
+    # Empty at k = 4. Written to run.json so a run says how far it departs from the k principle.
+    scaling: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -90,10 +100,35 @@ def go_duration(seconds: float) -> str:
     return f"{m}m{s}s" if m else f"{s}s"
 
 
+def scaled_duration_s(flag: str, upstream_s: int, k: int) -> int:
+    """An upstream duration divided by k, as the whole seconds a flag is given.
+
+    Two rules, applied in this order:
+    - round to the nearest whole second (halves up), and never below 1s;
+    - a loop interval is never below the metrics resolution.
+    At k = 4 neither rule changes any value.
+    """
+    if k < 1:
+        raise ValueError(f"k must be a positive integer, got {k}")
+    seconds = max(1, math.floor(upstream_s / k + 0.5))
+    if flag in LOOP_INTERVALS:
+        seconds = max(seconds, METRICS_RESOLUTION_S)
+    return seconds
+
+
+def _scaling_note(flag: str, upstream_s: int, k: int) -> dict[str, Any] | None:
+    used, exact = scaled_duration_s(flag, upstream_s, k), upstream_s / k
+    if used == exact:
+        return None
+    floored = flag in LOOP_INTERVALS and used == METRICS_RESOLUTION_S and exact < METRICS_RESOLUTION_S
+    return {"exact_s": exact, "used_s": used,
+            "reason": "floored at the metrics resolution" if floored else "rounded to whole seconds"}
+
+
 def vpa_flags(k: int, overrides: dict[str, str] | None = None, *, restrict_to_declared: bool = True) -> VpaFlags:
-    """Upstream defaults with every time-based setting divided by k, then the overrides."""
-    recommender = {f: go_duration(v / k) for f, v in _RECOMMENDER_DURATIONS.items()} | _RECOMMENDER_VALUES
-    updater = {f: go_duration(v / k) for f, v in _UPDATER_DURATIONS.items()} | _UPDATER_VALUES
+    """Upstream defaults with every time-based setting divided by k (scaled_duration_s), then the overrides."""
+    recommender = {f: go_duration(scaled_duration_s(f, v, k)) for f, v in _RECOMMENDER_DURATIONS.items()} | _RECOMMENDER_VALUES
+    updater = {f: go_duration(scaled_duration_s(f, v, k)) for f, v in _UPDATER_DURATIONS.items()} | _UPDATER_VALUES
     for knob, value in (overrides or {}).items():
         if restrict_to_declared and knob not in DECLARED_KNOBS:
             raise UndeclaredKnob(f"{knob} is not in the declared knob set (spec section 7)")
@@ -101,7 +136,9 @@ def vpa_flags(k: int, overrides: dict[str, str] | None = None, *, restrict_to_de
         if knob not in target:
             raise UndeclaredKnob(f"{knob} is not a known flag")
         target[knob] = value
-    return VpaFlags(recommender, updater)
+    scaling = {f: note for f, v in (_RECOMMENDER_DURATIONS | _UPDATER_DURATIONS).items()
+               if f not in (overrides or {}) and (note := _scaling_note(f, v, k))}
+    return VpaFlags(recommender, updater, scaling)
 
 
 _BASE_ARGS = ["--v=4", "--stderrthreshold=info"]

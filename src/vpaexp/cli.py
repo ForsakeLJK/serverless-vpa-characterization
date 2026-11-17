@@ -33,19 +33,38 @@ class Experiment:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.profile = Profile.load(Path("cluster") / f"{args.profile}.toml")
-        self.root = Path(args.results) / self.profile.name
+        if args.k < 1 or args.keep_every < 1:
+            sys.exit("--k and --keep-every must be positive integers")
+        self.k: int = args.k
+        self.keep_every: int = args.keep_every
+        # The payload cost belongs to the testbed; everything else to the compression, so a
+        # rehearsal (k = 96) never mixes with the k = 4 campaign in sizing, runs or reports.
+        self.testbed_root = Path(args.results) / self.profile.name
+        self.root = Path(args.results) / (self.profile.name + self.compression_suffix())
         self.arrivals = load_arrivals(ARRIVALS)
+        if self.root != self.testbed_root:
+            log(f"compression k = {self.k}, keeping every {self.keep_every} arrival(s); results under {self.root}")
+
+    def compression_suffix(self) -> str:
+        """'' for the campaign (k = 4, every arrival), e.g. '-k96-keep4' otherwise."""
+        if self.k == K and self.keep_every == 1:
+            return ""
+        return f"-k{self.k}" + (f"-keep{self.keep_every}" if self.keep_every != 1 else "")
+
+    def schedule(self, s: Slice) -> Floats:
+        """Send times of the slice at this compression: time divided by k, then every Nth arrival kept."""
+        return replay_schedule(self.arrivals, s, self.k)[:: self.keep_every]
 
     def payload_cost(self) -> sizing.PayloadCost:
         """Per-request cost: measured on this testbed if `vpaexp measure` has run, else the profile's estimate."""
-        path = self.root / "payload-cost.json"
+        path = self.testbed_root / "payload-cost.json"
         if path.exists():
             return sizing.PayloadCost(**json.loads(path.read_text()))
         log(f"WARNING: no {path}; using the unverified estimates in cluster/{self.profile.name}.toml")
         return self.profile.payload_cost
 
     def demand(self, s: Slice) -> sizing.Demand:
-        return sizing.offline_demand(replay_schedule(self.arrivals, s), self.payload_cost())
+        return sizing.offline_demand(self.schedule(s), self.payload_cost())
 
     def sizing_path(self, name: str) -> Path:
         return self.root / "sizing" / f"{name}.json"
@@ -97,11 +116,12 @@ class Experiment:
              extra: dict[str, Any] | None = None) -> RunPlan:
         """A run over the slice: all of it, unless a schedule and duration are given."""
         return RunPlan(
-            out_dir=out, setting=setting, slice_name=s.name, rep=rep, k=K,
-            schedule=replay_schedule(self.arrivals, s) if schedule is None else schedule,
-            duration_s=s.replay_duration_s() if duration_s is None else duration_s,
+            out_dir=out, setting=setting, slice_name=s.name, rep=rep, k=self.k,
+            schedule=self.schedule(s) if schedule is None else schedule,
+            duration_s=s.replay_duration_s(self.k) if duration_s is None else duration_s,
             allocation=alloc, concurrency_cap=cap, flags=flags, service_s=self.payload_cost().service_s,
-            phase_boundary_s=phase_boundary_s, poll_metrics_api=poll_metrics_api, extra=extra,
+            phase_boundary_s=phase_boundary_s, poll_metrics_api=poll_metrics_api,
+            extra={"keep_every": self.keep_every, **(extra or {})},
         )
 
     def sizing_replay(self, s: Slice, name: str, cap: int) -> sizing.Peaks:
@@ -148,7 +168,7 @@ def cmd_measure(args: argparse.Namespace) -> None:
     if float(np.max(run.samples.memory_peak_bytes, initial=0.0)) <= 0:
         sys.exit("the node's kernel does not expose memory.peak (needs Linux 5.19+); per-request memory cannot be measured")
     cost = metrics.payload_cost(run, lead_in)
-    write_json(exp.root / "payload-cost.json", asdict(cost))
+    write_json(exp.testbed_root / "payload-cost.json", asdict(cost))
     print(f"service time {cost.service_s * 1000:.0f} ms (trace function median: 380 ms); "
           f"memory {cost.request_mem_bytes / config.MI:.0f} MiB above a {cost.baseline_mem_bytes / config.MI:.0f} MiB baseline")
 
@@ -158,7 +178,7 @@ def cmd_size(args: argparse.Namespace) -> None:
     exp = Experiment(args)
     window = WINDOWS[args.window]
     demand = exp.demand(window)
-    record: dict[str, Any] = {"window": window.name, "payload_cost": asdict(exp.payload_cost()), "demand": demand.to_json()}
+    record: dict[str, Any] = {"window": window.name, "k": exp.k, "keep_every": exp.keep_every, "payload_cost": asdict(exp.payload_cost()), "demand": demand.to_json()}
     generous = exp.profile.generous
     if demand.peaks.memory_bytes > generous.memory_bytes:
         log("WARNING: calculated peak memory exceeds the profile's generous limit")
@@ -168,7 +188,7 @@ def cmd_size(args: argparse.Namespace) -> None:
     cap = sizing.CAP_FACTOR * demand.peaks.concurrency
 
     if args.validate:
-        s = sizing.validation_slice(window, demand.peak_at_s)
+        s = sizing.validation_slice(window, demand.peak_at_s, exp.k)
         slice_calc = exp.demand(s).peaks
         measured = exp.sizing_replay(s, s.name, cap)
         record |= {"method": "validated", "slice_calc": asdict(slice_calc), "slice_measured": asdict(measured)}
@@ -198,19 +218,27 @@ def _load_sizing(exp: Experiment, window: str) -> sizing.Sizing:
     if not path.exists():
         sys.exit(f"no sizing for window {window}; run: vpaexp size --window {window} --validate")
     record = json.loads(path.read_text())
+    sized_at = (record.get("k", K), record.get("keep_every", 1))
+    if sized_at != (exp.k, exp.keep_every):
+        sys.exit(f"{path} was sized at k = {sized_at[0]}, keep every {sized_at[1]}; this run uses "
+                 f"k = {exp.k}, keep every {exp.keep_every}. Size the window again with the same options.")
     if record["method"] == "calculated":
         log("WARNING: static sizing is calculated only, not validated; acceptable for smoke tests only")
     return sizing.Sizing.from_json(record["sizing"])
 
 
-def _flags(setting: str, config_path: str | None) -> config.VpaFlags | None:
+def _flags(setting: str, config_path: str | None, k: int) -> config.VpaFlags | None:
     if setting == "static":
         return None
     if setting == "default":
-        return config.vpa_flags(K)
-    if not config_path:
+        flags = config.vpa_flags(k)
+    elif not config_path:
         sys.exit("--setting tuned needs --config FILE (a TOML file with a [flags] table)")
-    return config.vpa_flags(K, tomllib.loads(Path(config_path).read_text())["flags"])
+    else:
+        flags = config.vpa_flags(k, tomllib.loads(Path(config_path).read_text())["flags"])
+    for flag, note in flags.scaling.items():
+        log(f"NOTE: {flag} = {note['used_s']}s, not {note['exact_s']:g}s ({note['reason']})")
+    return flags
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -218,14 +246,14 @@ def cmd_run(args: argparse.Namespace) -> None:
     exp = Experiment(args)
     window = WINDOWS[args.window]
     size = _load_sizing(exp, window.name)
-    schedule, duration = replay_schedule(exp.arrivals, window), window.replay_duration_s()
+    schedule, duration = exp.schedule(window), window.replay_duration_s(exp.k)
     label = args.label or f"r{args.rep}"
     if args.limit_s:
         schedule, duration, label = schedule[schedule < args.limit_s], args.limit_s, f"{label}-smoke"
-    boundary = DAY_S / K
+    boundary = DAY_S / exp.k
     out = exp.run_dir(f"{window.name}-{args.setting}-{label}")
     plan = exp.plan(window, out, args.setting, exp.allocation(size.memory_bytes),
-                    size.concurrency_cap, _flags(args.setting, args.config),
+                    size.concurrency_cap, _flags(args.setting, args.config, exp.k),
                     schedule=schedule, duration_s=duration, rep=args.rep,
                     phase_boundary_s=boundary if duration > boundary else None,
                     extra={"label": label, "tuned_config": args.config})
@@ -244,6 +272,8 @@ def cmd_run(args: argparse.Namespace) -> None:
 def cmd_prototype(args: argparse.Namespace) -> None:
     """Section 11: a 30-minute pipeline check on a busy 2h slice of day 2, with shortened VPA windows."""
     exp = Experiment(args)
+    if exp.compression_suffix():
+        sys.exit("the prototype run is defined at k = 4 with every arrival (section 11); drop --k and --keep-every")
     s = busiest_slice(exp.arrivals, days("day2", 2, 1), 7200.0, "proto")
     size = sizing.static_sizing(exp.demand(s).peaks)
     alloc = exp.allocation(min(size.memory_bytes, exp.profile.generous.memory_bytes))
@@ -355,6 +385,10 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="vpaexp", description=__doc__)
     p.add_argument("--profile", default="prototype", help="cluster/<profile>.toml (prototype or full)")
     p.add_argument("--results", default="results")
+    p.add_argument("--k", type=int, default=K,
+                   help=f"time compression factor (default {K}, the campaign). VPA durations are divided by it")
+    p.add_argument("--keep-every", type=int, default=1, metavar="N",
+                   help="replay every Nth arrival only (default 1, all of them)")
     sub = p.add_subparsers(required=True)
 
     def command(name: str, fn: Any, help: str) -> argparse.ArgumentParser:

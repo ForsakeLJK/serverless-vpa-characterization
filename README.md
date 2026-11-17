@@ -65,6 +65,16 @@ uv run vpaexp --profile full run --setting tuned   --window A --label it1 --conf
 uv run vpaexp --profile full run --setting static  --window A --rep 1
 ```
 
+### Rehearsal: the whole campaign at 1h per run
+
+The same commands with `--k 96 --keep-every 4` before the command name. Each four-day window replays in 1h, so the validation replay of `size --validate` covers the whole window. This checks the campaign end to end (sizing, tuning, both comparisons, reports, per-run overhead, disk use) in about a day. Its numbers are not results: at `k = 96` the VPA loops run 24× slower than the `k = 4` principle asks, and tuned durations do not carry over to `k = 4`. Keep its tuning files apart from `tuning/`.
+
+```bash
+uv run vpaexp --profile full --k 96 --keep-every 4 size --window A --validate
+uv run vpaexp --profile full --k 96 --keep-every 4 run --setting default --window A --rep 1
+uv run vpaexp --profile full --k 96 --keep-every 4 report --window A
+```
+
 If `size --validate` reports a disagreement above 10%, it exits non-zero and that window needs `size --window X --full-profile` (a 24h profiling replay).
 
 ### Arguments
@@ -75,6 +85,10 @@ Global options go before the command name (`vpaexp --profile full run ...`).
 |---|---|---|---|---|
 | `--profile NAME` | No | `prototype` | Pass `full` on every command on the ARM server. | Testbed profile, read from `cluster/NAME.toml`. Sets the kube context, namespace, image, function URL and sizing limits, and the results subdirectory. |
 | `--results DIR` | No | `results` | To keep a campaign's output apart from earlier results. | Root of the results tree. Output goes to `DIR/<profile>/`. |
+| `--k N` | No | `4` | Rehearsal only (`--k 96`). Leave it at 4 for the campaign. | Time compression factor. The window replays in `96h / N`, and every time-based VPA flag is upstream divided by `N`, rounded to whole seconds; the two loop intervals never go below the 15s metrics resolution. Flags that are not exactly upstream / `N` are logged and recorded under `vpa_flags.scaling` in `run.json`. |
+| `--keep-every N` | No | `1` | Rehearsal only (`--keep-every 4`). | Replay every `N`th arrival of the compressed schedule. At `--k 96 --keep-every 4` peak concurrency is close to the campaign's (19 and 32 against 17 and 25). |
+
+With either option away from its default, output goes to `DIR/<profile>-k<N>[-keep<N>]/` (for example `results/full-k96-keep4/`), so rehearsal sizing, runs and reports never mix with the campaign's. `payload-cost.json` stays in `DIR/<profile>/`, since it belongs to the testbed. `run` refuses a sizing made at another `--k` or `--keep-every`, and `prototype` refuses both options.
 
 `measure` sends a few spaced requests to a generously sized pod and writes `payload-cost.json` (service time and memory per request), which `size` and `run` then use in place of the profile's estimates.
 

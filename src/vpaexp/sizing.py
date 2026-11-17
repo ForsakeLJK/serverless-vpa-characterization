@@ -86,10 +86,14 @@ def offline_demand(schedule: Floats, cost: PayloadCost) -> Demand:
     )
 
 
-def validation_slice(window: Slice, peak_at_s: float) -> Slice:
-    """The hour of replay centred on the calculated peak, kept inside the window (section 6.1)."""
-    start = min(max(peak_at_s - VALIDATION_S / 2, 0.0), window.replay_duration_s() - VALIDATION_S)
-    return Slice(f"{window.name}-validate", window.trace_start_s + start * K, VALIDATION_S * K)
+def validation_slice(window: Slice, peak_at_s: float, k: int = K) -> Slice:
+    """The hour of replay centred on the calculated peak, kept inside the window (section 6.1).
+
+    Where the whole window replays in an hour or less (k = 96), the slice is the whole window.
+    """
+    start = max(min(peak_at_s - VALIDATION_S / 2, window.replay_duration_s(k) - VALIDATION_S), 0.0)
+    return Slice(f"{window.name}-validate", window.trace_start_s + start * k,
+                 min(VALIDATION_S * k, window.trace_duration_s))
 
 
 def static_sizing(calc: Peaks, slice_calc: Peaks | None = None, slice_measured: Peaks | None = None) -> Sizing:

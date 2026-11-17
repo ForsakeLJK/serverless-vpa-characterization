@@ -5,6 +5,7 @@ from vpaexp.config import (
     UndeclaredKnob,
     deployment_manifest,
     recommender_args,
+    scaled_duration_s,
     updater_args,
     vpa_flags,
     vpa_manifest,
@@ -42,6 +43,45 @@ def test_unscaled_flags_are_the_upstream_defaults() -> None:
     assert f.recommender["cpu-histogram-decay-half-life"] == "24h0m0s"
     assert f.updater["evict-after-oom-threshold"] == "10m0s"
     assert f.updater["updater-interval"] == "1m0s"
+
+
+def test_at_k_4_every_scaled_flag_is_exactly_upstream_over_k() -> None:
+    assert vpa_flags(k=4).scaling == {}
+
+
+def test_rehearsal_k_rounds_to_whole_seconds_and_floors_loop_intervals_at_the_metrics_resolution() -> None:
+    f = vpa_flags(k=96)
+    assert f.recommender["memory-histogram-decay-half-life"] == "15m0s"  # 86400 / 96, exact
+    assert f.recommender["memory-aggregation-interval"] == "15m0s"
+    assert f.updater["in-recommendation-bounds-eviction-lifetime-threshold"] == "7m30s"  # 43200 / 96, exact
+    assert f.updater["evict-after-oom-threshold"] == "6s"  # 6.25s, rounded
+    assert f.recommender["recommender-interval"] == f.updater["updater-interval"] == "15s"  # 0.625s, floored
+    assert f.scaling == {
+        "recommender-interval": {"exact_s": 0.625, "used_s": 15, "reason": "floored at the metrics resolution"},
+        "updater-interval": {"exact_s": 0.625, "used_s": 15, "reason": "floored at the metrics resolution"},
+        "evict-after-oom-threshold": {"exact_s": 6.25, "used_s": 6, "reason": "rounded to whole seconds"},
+    }
+
+
+@pytest.mark.parametrize("upstream_s, k, expected", [(600, 96, 6), (600, 80, 8), (600, 48, 13), (600, 1000, 1)])
+def test_scaled_durations_round_halves_up_and_never_reach_zero(upstream_s: int, k: int, expected: int) -> None:
+    assert scaled_duration_s("evict-after-oom-threshold", upstream_s, k) == expected
+
+
+def test_the_floor_applies_to_loop_intervals_only() -> None:
+    assert scaled_duration_s("updater-interval", 60, 8) == 15  # 7.5s
+    assert scaled_duration_s("evict-after-oom-threshold", 600, 96) == 6  # below 15s, but not a loop
+
+
+def test_k_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        scaled_duration_s("updater-interval", 60, 0)
+
+
+def test_an_overridden_knob_has_no_scaling_note() -> None:
+    f = vpa_flags(k=96, overrides={"evict-after-oom-threshold": "30s"}, restrict_to_declared=False)
+    assert f.updater["evict-after-oom-threshold"] == "30s"
+    assert "evict-after-oom-threshold" not in f.scaling
 
 
 def test_tuning_overrides_a_declared_knob_and_leaves_the_rest() -> None:

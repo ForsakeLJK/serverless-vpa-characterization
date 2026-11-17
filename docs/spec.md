@@ -169,6 +169,8 @@ Upstream defaults, with every time-based setting divided by `k = 4`. Everything 
 
 A recommender that polls faster than the metrics refresh sees repeated samples, and each CPU sample is an average over the scrape window. The whole loop therefore cannot usefully run faster than 15s, which is 1 minute divided by 4. At larger `k`, VPA would react more slowly relative to the workload than it does in production (3× slower at `k = 12`, 6× at `k = 24`, with a 15s floor). No component is patched or replaced.
 
+**Scaling rule for other `k`.** A scaled duration is upstream divided by `k`, rounded to the nearest whole second (halves up) and never below 1s; `recommender-interval` and `updater-interval` are then raised to at least the 15s metrics resolution. At `k = 4` neither step changes any value. Each run records which flags departed from exact division and why. Only the rehearsal (section 10) uses another `k`.
+
 ### 6.3 VPA tuned
 
 The configuration chosen by the procedure in section 7.
@@ -255,6 +257,8 @@ Repetition rule: every setting that appears in a results figure gets 3 repetitio
 | Main comparison on A (3 settings × 3 repetitions) | 9 | 216h |
 | Transfer on B (3 settings × 3 repetitions) | 9 | 216h |
 | **Total** | **21 full runs, 2 short** | **506h, about 21 days** |
+
+**Rehearsal.** Before the campaign, the whole run plan is executed once at `k = 96` with every 4th arrival kept, so each window replays in 1h with peak concurrency close to `k = 4` (19 and 32 against 17 and 25). It checks the campaign end to end and measures per-run overhead. Its results are not reported: VPA's loop intervals sit at the 15s floor, 24× slower than the design principle asks.
 
 Per-run reset and collection overhead is extra and not yet measured. A window whose validation replay fails the 10% tolerance adds a 24h profiling replay. The first default run on A doubles as the starting observation for tuning.
 
