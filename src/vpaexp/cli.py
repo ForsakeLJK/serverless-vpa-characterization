@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shutil
 import sys
+import time
 import tomllib
 from dataclasses import asdict
 from pathlib import Path
@@ -50,30 +50,39 @@ class Experiment:
     def sizing_path(self, name: str) -> Path:
         return self.root / "sizing" / f"{name}.json"
 
-    def run_dir(self, name: str, force: bool = False) -> Path:
-        d = self.root / "runs" / name
+    def run_dir(self, name: str) -> Path:
+        """A new directory `runs/<name>-<YYYYmmdd-HHMMSS>`: every attempt is kept, none is overwritten."""
+        d = self.root / "runs" / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}"
         if d.exists():
-            if not force:
-                sys.exit(f"{d} already exists; pass --force to replace it")
-            shutil.rmtree(d)
+            sys.exit(f"{d} already exists; wait a second and start again")
         return d
 
     def runs(self, window: str, setting: str, label: str) -> list[Run]:
         """The valid, completed runs of a setting on a window whose label matches the pattern.
 
+        Each run directory is a separate attempt. Where a label has several, the latest one counts.
+
         Section 6: a run with any CPU throttling is invalid. It takes no part in any result
         and is named here so that it gets repeated.
         """
-        found = []
+        latest: dict[str, Run] = {}
         for d in sorted((self.root / "runs").glob(f"{window}-{setting}-*")):
             if not ((d / "run.json").exists() and (d / "client.csv").exists()):
                 continue
             run = load_run(d)
             if not re.fullmatch(label, run.label):
                 continue
+            previous = latest.get(run.label)
+            if previous is not None and previous.t0 > run.t0:
+                run, previous = previous, run
+            if previous is not None:
+                print(f"SUPERSEDED: {previous.path.name} (a later attempt of {run.label} exists)")
+            latest[run.label] = run
+        found = []
+        for run in latest.values():
             reason = metrics.invalid_reason(run)
             if reason:
-                print(f"EXCLUDED, invalid run {d.name}: {reason}")
+                print(f"EXCLUDED, invalid run {run.path.name}: {reason}")
             else:
                 found.append(run)
         return found
@@ -95,12 +104,12 @@ class Experiment:
             phase_boundary_s=phase_boundary_s, poll_metrics_api=poll_metrics_api, extra=extra,
         )
 
-    def sizing_replay(self, s: Slice, name: str, cap: int, force: bool) -> sizing.Peaks:
+    def sizing_replay(self, s: Slice, name: str, cap: int) -> sizing.Peaks:
         """Replay the slice with a generous memory limit, the fixed CPU and no VPA; return the measured peaks.
 
         Section 13: the replay must show no CPU throttling. If it does, no sizing comes of it.
         """
-        out = self.run_dir(name, force)
+        out = self.run_dir(name)
         execute(self.profile, self.plan(s, out, "generous", self.profile.generous, cap, None))
         run = load_run(out)
         reason = metrics.invalid_reason(run)
@@ -129,7 +138,7 @@ def cmd_measure(args: argparse.Namespace) -> None:
     lead_in, n, gap = 10.0, args.requests, 3.0
     schedule = lead_in + gap * np.arange(n, dtype=np.float64)
     s = Slice("measure", 0.0, 0.0)
-    out = exp.run_dir("measure", args.force)
+    out = exp.run_dir("measure")
     execute(exp.profile, exp.plan(s, out, "generous", exp.profile.generous, 4, None,
                                   schedule=schedule, duration_s=lead_in + gap * n))
     run = load_run(out)
@@ -161,7 +170,7 @@ def cmd_size(args: argparse.Namespace) -> None:
     if args.validate:
         s = sizing.validation_slice(window, demand.peak_at_s)
         slice_calc = exp.demand(s).peaks
-        measured = exp.sizing_replay(s, s.name, cap, args.force)
+        measured = exp.sizing_replay(s, s.name, cap)
         record |= {"method": "validated", "slice_calc": asdict(slice_calc), "slice_measured": asdict(measured)}
         try:
             result = sizing.static_sizing(demand.peaks, slice_calc, measured)
@@ -169,7 +178,7 @@ def cmd_size(args: argparse.Namespace) -> None:
             write_json(exp.sizing_path(window.name + "-failed-validation"), record | {"error": str(e)})
             sys.exit(f"validation failed: {e}\nrun: vpaexp size --window {window.name} --full-profile")
     elif args.full_profile:
-        measured = exp.sizing_replay(window, f"{window.name}-profile", cap, args.force)
+        measured = exp.sizing_replay(window, f"{window.name}-profile", cap)
         record |= {"method": "profiled", "measured": asdict(measured)}
         result = sizing.sizing_from_peaks(measured)
     else:
@@ -214,7 +223,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     if args.limit_s:
         schedule, duration, label = schedule[schedule < args.limit_s], args.limit_s, f"{label}-smoke"
     boundary = DAY_S / K
-    out = exp.run_dir(f"{window.name}-{args.setting}-{label}", args.force)
+    out = exp.run_dir(f"{window.name}-{args.setting}-{label}")
     plan = exp.plan(window, out, args.setting, exp.allocation(size.memory_bytes),
                     size.concurrency_cap, _flags(args.setting, args.config),
                     schedule=schedule, duration_s=duration, rep=args.rep,
@@ -239,7 +248,7 @@ def cmd_prototype(args: argparse.Namespace) -> None:
     size = sizing.static_sizing(exp.demand(s).peaks)
     alloc = exp.allocation(min(size.memory_bytes, exp.profile.generous.memory_bytes))
     flags = config.vpa_flags(K, config.PROTOTYPE_FLAGS, restrict_to_declared=False)
-    out = exp.run_dir("proto-prototype-r1", args.force)
+    out = exp.run_dir("proto-prototype-r1")
     execute(exp.profile, exp.plan(s, out, metrics.PROTOTYPE, alloc, size.concurrency_cap, flags, rep=1, poll_metrics_api=True))
     sys.exit(_gate(out))
 
@@ -357,7 +366,6 @@ def main() -> None:
 
     c = command("measure", cmd_measure, "measure the payload's service time and memory on this testbed")
     c.add_argument("--requests", type=int, default=20)
-    c.add_argument("--force", action="store_true")
 
     c = command("size", cmd_size, "static sizing for a window")
     c.add_argument("--window", choices=sorted(WINDOWS), required=True)
@@ -365,7 +373,6 @@ def main() -> None:
     how.add_argument("--validate", action="store_true", help="run the 1h validation replay and save the sizing")
     how.add_argument("--full-profile", action="store_true", help="run a full 24h profiling replay instead")
     how.add_argument("--write-unvalidated", action="store_true", help="save the calculation alone (smoke tests)")
-    c.add_argument("--force", action="store_true")
 
     c = command("run", cmd_run, "one run: a setting, a window, a repetition")
     c.add_argument("--setting", choices=SETTINGS, required=True)
@@ -374,10 +381,8 @@ def main() -> None:
     c.add_argument("--config", help="tuned only: TOML file with a [flags] table of declared knobs")
     c.add_argument("--label", help="run label instead of r<rep>, e.g. it1 for a tuning iteration")
     c.add_argument("--limit-s", type=float, help="smoke test: replay only the first N seconds")
-    c.add_argument("--force", action="store_true")
 
     c = command("prototype", cmd_prototype, "the 30-minute prototype run, then the gate")
-    c.add_argument("--force", action="store_true")
 
     c = command("gate", cmd_gate, "evaluate the five prototype gate checks on a run directory")
     c.add_argument("run_dir")

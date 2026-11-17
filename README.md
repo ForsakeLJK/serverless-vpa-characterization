@@ -42,7 +42,7 @@ uv run vpaexp --profile prototype measure
 uv run vpaexp --profile prototype prototype
 ```
 
-`setup-prototype.sh` prints the function URL; put it in `cluster/prototype.toml` if it differs. `prototype` runs for 30 minutes and then prints the five gate checks. `uv run vpaexp gate <run-dir>` re-evaluates them on an existing run.
+`setup-prototype.sh` prints the function URL; put it in `cluster/prototype.toml` if it differs. `prototype` runs for 30 minutes and then prints the five gate checks. Each prototype run writes a new `results/prototype/runs/proto-prototype-r1-<timestamp>/`; `uv run vpaexp gate <run-dir>` re-evaluates the checks on any of them.
 
 ## Full runs, on the ARM server
 
@@ -81,7 +81,6 @@ Global options go before the command name (`vpaexp --profile full run ...`).
 | Name | Required | Default | When to use | Meaning |
 |---|---|---|---|---|
 | `--requests N` | No | `20` | Raise it if the measured service time varies between attempts. | Number of calibration requests, sent a fixed 3s apart so they never overlap. This is a sample size, not a load level: `measure` does not replay the trace. |
-| `--force` | No | off | When re-measuring. | Replace the existing `measure` run directory. Without it, the command refuses to overwrite. |
 
 `size` computes the static allocation and concurrency cap for a window. With no mode flag it prints the offline calculation and saves nothing.
 
@@ -93,7 +92,6 @@ Global options go before the command name (`vpaexp --profile full run ...`).
 
 A validation or profiling replay that records any CPU throttling is invalid: `size` exits non-zero and saves no sizing (§13).
 | `--write-unvalidated` | No | off | Smoke tests only. | Save the calculation alone, with no replay. `run` warns when it uses such a sizing. |
-| `--force` | No | off | When repeating a validation or profiling replay. | Replace the existing validation or profiling run directory. |
 
 `--validate`, `--full-profile` and `--write-unvalidated` are mutually exclusive.
 
@@ -107,11 +105,10 @@ A validation or profiling replay that records any CPU throttling is invalid: `si
 | `--config FILE` | Only with `--setting tuned` | none | Every tuned run: tuning iterations and the final tuned repetitions. | A TOML file with a `[flags]` table of declared knobs (see `tuning/example.toml`). Ignored for `static` and `default`. |
 | `--label NAME` | No | `r<rep>` | Tuning iterations: `it1`, `it2`, ... | Run label in place of `r<rep>`. `tune-select` picks up `it<N>` labels, `report` only `r<N>`. |
 | `--limit-s SECONDS` | No | whole window (24h) | Smoke tests, before committing to a 24h run. | Replay only the first `SECONDS` of the window. Appends `-smoke` to the label. |
-| `--force` | No | off | When redoing a run that failed or was invalid. | Replace the run directory if it already exists. Without it, the command refuses to overwrite. |
 
-The run directory is `<window>-<setting>-<label>`, so `--setting default --window A --rep 2` writes `A-default-r2`.
+The run directory is `<window>-<setting>-<label>-<YYYYmmdd-HHMMSS>`, so `--setting default --window A --rep 2` writes something like `A-default-r2-20261117-142530`. Every command that replays load (`measure`, `size --validate`, `size --full-profile`, `run`, `prototype`) writes a new timestamped directory and never overwrites an earlier one. To redo a run, run the same command again. Where a label has several attempts, `report` and `tune-select` use the latest and print the others as `SUPERSEDED`.
 
-Each run writes a self-describing directory under `results/<profile>/runs/<window>-<setting>-<label>/`:
+Each run writes a self-describing directory under `results/<profile>/runs/<window>-<setting>-<label>-<timestamp>/`:
 
 | File | Content |
 |---|---|
@@ -125,7 +122,7 @@ Each run writes a self-describing directory under `results/<profile>/runs/<windo
 Bring `results/full/` back from the server; analysis runs anywhere:
 
 ```bash
-uv run vpaexp figures results/full/runs/A-default-r1       # re-render figures 1-6 and overview.png (every run renders them itself)
+uv run vpaexp figures results/full/runs/A-default-r1-<timestamp>      # re-render figures 1-6 and overview.png (every run renders them itself)
 uv run vpaexp --profile full tune-select                   # selection rule over it1, it2, ...
 uv run vpaexp --profile full report --window A             # figure 7, H1
 uv run vpaexp --profile full report --window B             # figure 8 (H1 is tested on window A only)
