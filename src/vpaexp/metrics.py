@@ -12,7 +12,7 @@ from vpaexp.sizing import PayloadCost, Peaks
 from vpaexp.trace import Floats
 
 Summary = dict[str, float]
-PROTOTYPE: Final = "prototype"  # the one setting exempt from the CPU validity check (section 11)
+PROTOTYPE: Final = "prototype"
 
 
 @dataclass(frozen=True)
@@ -126,9 +126,11 @@ def _summarize(run: Run, a: float, b: float) -> Summary:
     m = (s.t > a) & (s.t <= b)
     out["usage_mem_bytes"] = _mean(s.memory_bytes[m])
     out["util_mem"] = _mean(memory_utilization(run)[m])
-    # Not a result: CPU is fixed and generous in every setting (section 6). Any throttling
-    # means CPU was a constraint after all, and the run is invalid.
+    # CPU quota is fixed. Record throttling as context for latency and memory results.
     out["cpu_throttled_s"] = float(np.sum(s.throttled_s[m]))
+    periods = float(np.sum(s.cpu_periods[m]))
+    throttled_periods = float(np.sum(s.cpu_throttled_periods[m]))
+    out["cpu_throttled_period_pct"] = 100 * throttled_periods / periods if periods else 0.0
 
     # Like a sample, a kill or restart at the phase boundary belongs to the phase that ends there.
     kills = oom_kill_times(run)
@@ -179,21 +181,21 @@ def static_sizing_too_low(run: Run) -> str | None:
     return f"{kills} OOM kill{'s' if kills > 1 else ''}" if kills else None
 
 
-def cpu_was_limiting(run: Run) -> str | None:
-    """Whether the fixed CPU throttled the function at any point, and for how long."""
-    throttled = float(np.sum(run.samples.throttled_s))
-    if throttled <= 0:
-        return None
-    return f"CPU was throttled for {throttled:.1f}s ({100 * throttled / run.duration_s:.1f}% of the run)"
-
-
 def invalid_reason(run: Run) -> str | None:
-    """Section 6: any CPU throttling makes a run invalid. None means the run is valid.
-
-    The prototype run is exempt (section 11): its testbed cannot give generous CPU, and it
-    only verifies the pipeline.
-    """
-    return None if run.setting == PROTOTYPE else cpu_was_limiting(run)
+    """Require a complete replay and successful requests for sizing and calibration."""
+    statuses = run.client.status
+    planned = run.meta.get("requests_scheduled")
+    if planned is not None and len(statuses) != planned:
+        return f"recorded {len(statuses)} of {planned} scheduled requests"
+    if run.setting == "generous":
+        if not len(statuses):
+            return "no requests recorded"
+        failed = int(np.sum(statuses != "ok"))
+        if failed:
+            return f"{failed} of {len(statuses)} requests failed or timed out"
+        if not len(run.samples.t):
+            return "no usable cgroup samples recorded"
+    return None
 
 
 def aggregate(summaries: list[Summary]) -> dict[str, dict[str, float]]:

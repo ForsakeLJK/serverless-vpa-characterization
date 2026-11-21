@@ -124,7 +124,9 @@ class Samples:
     memory_bytes: Floats
     memory_peak_bytes: Floats
     oom_kills: Floats
-    throttled_s: Floats  # not a result: the validity check that the fixed CPU was generous
+    throttled_s: Floats
+    cpu_periods: Floats
+    cpu_throttled_periods: Floats
 
 
 @dataclass(frozen=True)
@@ -220,13 +222,15 @@ def read_samples(path: Path) -> Samples:
     t = _column(rows, "t")
     if len(t) < 2:
         e = np.array([], dtype=np.float64)
-        return Samples(e, e, e, e, e)
+        return Samples(e, e, e, e, e, e, e)
     return Samples(
         t=t[1:],
         memory_bytes=_column(rows, "memory_current")[1:],
         memory_peak_bytes=_column(rows, "memory_peak")[1:],
         oom_kills=_increments(_column(rows, "oom_kill")),
         throttled_s=_increments(_column(rows, "throttled_usec")) / 1e6,
+        cpu_periods=_increments(_column(rows, "nr_periods")),
+        cpu_throttled_periods=_increments(_column(rows, "nr_throttled")),
     )
 
 

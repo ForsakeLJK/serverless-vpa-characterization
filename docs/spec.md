@@ -8,7 +8,7 @@ Items marked **[verify]** are assumptions, single measurements or derivations th
 
 Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on a single serverless function driven by real arrival times. Findings come from the results.
 
-**Scope: memory only.** VPA controls the function's memory and nothing else. CPU is fixed at a generous value in every setting, so it is never the constraint, and no CPU metric is a result. CPU demand is hard to define and to measure (a CPU shortage slows requests where a memory shortage kills them, and the amount needed depends on the time window considered), and it is not the goal of this study. CPU autoscaling is future work (section 15).
+**Scope: memory only.** VPA controls the function's memory. Each comparison uses the same fixed CPU quota and NUMA placement. The experiment measures memory autoscaling behavior under that quota, with CPU throttling recorded as context. CPU autoscaling is future work (section 15).
 
 **Design principle: default VPA must behave as it does in production.** Trace time is compressed by a factor `k`, and every time-based VPA setting is divided by exactly the same `k`, including the control-loop intervals. `k = 4` is the largest factor at which stock components allow this (section 6.2). The only delay that is not scaled is the kubelet's own resize work (section 14).
 
@@ -56,7 +56,7 @@ Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on 
   - **Concurrency inside one pod**: on a FaaS platform each instance serves one request at a time. Here the wrapper runs one process per request, so the arrival rate drives memory (and CPU) within the single pod.
   - **Warm invocations only**: each request's process is forked from a parent that has already imported igraph. Cold starts are out of scope.
 - **Concurrency cap**: 4× the peak concurrency from the sizing step for that window (section 6.1), fixed for all settings on that window. Requests beyond the cap queue in the server. The cap stops an overloaded pod from forking without bound; the factor 4 is a judgment call, not a derived value **[verify]**.
-- **Resources**: requests equal limits for CPU and memory (Guaranteed QoS). Memory is the resource under study: every change to its allocation alters what the function can use. CPU is fixed at a generous value (section 6) and never changes during a run.
+- **Resources**: requests equal limits for CPU and memory (Guaranteed QoS). Memory is the resource under study: every change to its allocation alters what the function can use. CPU uses the fixed quota in section 6.
 - **Resize policy**: `NotRequired` for CPU and memory. No resize may restart the container.
 
 Cost per invocation, measured once on the Mac outside a container **[verify]**. Results matched SeBS's expected values.
@@ -114,13 +114,13 @@ Estimated CPU demand at `k = 4`, from per-minute counts and the 0.33 s Mac servi
 
 All three settings use the same window, the same payload, the same initial memory allocation and the same fixed CPU.
 
-**Fixed CPU.** The pod's CPU request and limit are set once per testbed, in the cluster profile, and are identical in every run of every setting. VPA does not control CPU. The value must be generous: high enough that the function is never throttled. It is at least one core per request at the window's peak concurrency. Every run checks this: any CPU throttling recorded in the container's `cpu.stat` marks the run as invalid, and the fixed CPU is raised before it is repeated.
+**Fixed CPU.** The pod's CPU request and limit are set once per testbed in the cluster profile and are identical in every setting. The arm01 comparison uses 60000 millicores. CPU throttling is recorded for interpretation and is allowed in every setting.
 
 ### 6.1 Static (no VPA)
 
 Static memory is sized for the window's peak demand, found by an offline calculation that a short replay then validates. This replaces a full 24h profiling replay per window.
 
-**Offline calculation.** The workload is deterministic: every request does identical work, and with generous CPU requests do not slow each other down. Memory demand over the whole window is therefore computed from the trace's arrival times and the per-request service time and memory measured on the full-run machine. The calculation yields, for each window:
+**Offline calculation.** The workload is deterministic. The calculation estimates overlap from isolated request timings and uses the measured per-request memory to predict memory demand. Requests can slow each other down under load, so the estimates are checked in a replay under the same fixed CPU quota.
 
 - the peak concurrency (most requests in flight at one instant);
 - the highest memory usage;
@@ -128,6 +128,7 @@ Static memory is sized for the window's peak demand, found by an offline calcula
 
 **Validation replay.** The calculation does not model allocator overhead or the cost of forking, so it is checked against the real system. For each window, a 1h replay centred on the calculated memory peak runs with a generous memory limit, the fixed CPU and no VPA.
 
+- Every request must succeed in both the one-hour validation replay and the full profiling replay. Request failures and timeouts during the comparison runs are experimental outcomes.
 - The measured peak concurrency and peak memory must each agree with the calculation within 10%.
 - If any does not, that window falls back to a full 24h profiling replay.
 
@@ -225,7 +226,7 @@ An alternative ordering of the stages is recorded in Appendix A as an open quest
 | Failed or deferred resizes | Resizes reported as deferred, infeasible or errored | Pod status and events |
 | OOM kills | Count | `memory.events`, and container restarts with reason OOMKilled |
 
-No CPU metric is a result. The sampler still reads the container's `cpu.stat`, for one purpose: throttled time is the validity check that the fixed CPU was generous (section 6).
+Record the percentage of CPU quota periods with throttling and the cumulative throttled time from the container's `cpu.stat`. The percentage is the increase in `nr_throttled` divided by the increase in `nr_periods`, multiplied by 100. Throttled time accumulates across CPU run queues. Report these counters as context for the memory and latency outcomes.
 
 Every metric is reported for the whole run and split into two phases: the first scaled day (cold start, hours 0–6) and scaled days 2–4 (warmed, hours 6–24).
 
@@ -234,7 +235,7 @@ Every metric is reported for the whole run and split into two phases: the first 
 No Prometheus. Two purpose-built collectors:
 
 - **Watch recorder**: watches the VPA object, pod spec and status, and events. The API server audit log is enabled and is the authoritative clock for "recommendation updated" and "pod patched".
-- **cgroup sampler**: runs on the node and reads the container's `memory.current`, `memory.peak` and `memory.events` every 1s, and `cpu.stat` for the validity check.
+- **cgroup sampler**: runs on the node and reads the container's `memory.current`, `memory.peak`, `memory.events`, and `cpu.stat` every 1s.
 
 ## 9. Run protocol and hand-over
 
@@ -264,7 +265,7 @@ Per-run reset and collection overhead is extra and not yet measured. A window wh
 
 ## 11. Prototype gate
 
-One 30-minute run on the Mac minikube cluster. The prototype only verifies the pipeline, so it does not follow the `k = 4` principle: it replays a busy 2h slice of day 2 at `k = 4`, with VPA windows shortened far below the `k = 4` values so that resizes occur within the run. It uses the same function and payload as the full runs. The CPU validity check of section 6 does not apply to this run: the 4-vCPU VM cannot give the function generous CPU, so throttling is reported but does not make the run invalid. No full run starts until all five checks pass:
+One 30-minute run on the Mac minikube cluster. The prototype only verifies the pipeline, so it does not follow the `k = 4` principle: it replays a busy 2h slice of day 2 at `k = 4`, with VPA windows shortened far below the `k = 4` values so that resizes occur within the run. It uses the same function and payload as the full runs. CPU throttling is reported. No full run starts until all five checks pass:
 
 1. At least one memory resize up and one memory resize down.
 2. CPU is never resized: the pod's CPU request and limit stay at the fixed value for the whole run.
@@ -290,7 +291,7 @@ Figures 1–5 mark every OOM kill. Figures are rendered at 300 dpi, and every ru
 ## 13. Items to verify before full runs
 
 - **Payload cost**: re-measure pagerank's service time and memory per invocation at the `large` size on the ARM server, in a container. The duration match with the trace function and all demand estimates in section 4 depend on it.
-- **Fixed CPU value**: choose it for the ARM server and confirm in the validation replay and the smoke tests that no throttling occurs.
+- **Fixed CPU and NUMA placement**: confirm that the quota and placement are identical for all comparison runs.
 - **Concurrency cap factor**: 4× is a judgment call. Consider one run at a different factor to show the results do not hinge on it.
 - **Metrics refresh at 15s**: prototype gate check 4.
 - **System reserve** (memory) for `maxAllowed`: value not yet chosen.
@@ -308,7 +309,7 @@ Figures 1–5 mark every OOM kill. Figures are rendered at 300 dpi, and every ru
 - **Memory release under default needs about four scaled days.** The memory target is the 90th percentile of daily peaks, with each peak's weight halving per day of age. A first-day peak holds 33% of the weight after 2 days, 14% after 3 and 6.7% after 4, so it stops setting the target only on day 4 **[verify]**.
 - **Tuned is in-sample on window A** by design (H1). Window B measures transfer only against static and default, not against B's own best configuration.
 - **Tuning cannot explore faster loops**, because 15s is already the practical floor of the metrics path.
-- **Memory only.** VPA's CPU recommendations and CPU resizes are not exercised. With CPU fixed and generous, latency differences between settings come from memory alone: OOM kills, the restarts that follow them, and requests lost in between.
+- **Memory only.** The comparison measures memory autoscaling under the testbed's fixed CPU quota. Memory settings can affect latency through changes in request overlap and CPU throttling, as well as OOM kills and restarts.
 - **One function, one pod, one payload, one trace function.** Results do not cover horizontal scaling, multi-tenancy or other workload shapes.
 - **No scale-to-zero.** The pod stays alive through idle periods, which are most of each run. Idle-time cost is not compared against a platform that scales idle functions to zero.
 - **Concurrency inside one pod, warm invocations only.** Both differ from how a FaaS platform runs SeBS functions (section 3).

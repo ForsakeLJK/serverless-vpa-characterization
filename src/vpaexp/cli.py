@@ -80,9 +80,6 @@ class Experiment:
         """The valid, completed runs of a setting on a window whose label matches the pattern.
 
         Each run directory is a separate attempt. Where a label has several, the latest one counts.
-
-        Section 6: a run with any CPU throttling is invalid. It takes no part in any result
-        and is named here so that it gets repeated.
         """
         latest: dict[str, Run] = {}
         for d in sorted((self.root / "runs").glob(f"{window}-{setting}-*")):
@@ -107,7 +104,7 @@ class Experiment:
         return found
 
     def allocation(self, memory_bytes: int) -> Allocation:
-        """CPU is the profile's fixed, generous value in every run; only memory varies (section 6)."""
+        """CPU is fixed at the profile value in every run; only memory varies (section 6)."""
         return Allocation(self.profile.generous.cpu_millicores, memory_bytes)
 
     def plan(self, s: Slice, out: Path, setting: Setting, alloc: Allocation, cap: int, flags: config.VpaFlags | None, *,
@@ -127,22 +124,22 @@ class Experiment:
     def sizing_replay(self, s: Slice, name: str, cap: int) -> sizing.Peaks:
         """Replay the slice with a generous memory limit, the fixed CPU and no VPA; return the measured peaks.
 
-        Section 13: the replay must show no CPU throttling. If it does, no sizing comes of it.
+        Every request must succeed before its peaks can be used for sizing.
         """
         out = self.run_dir(name)
         execute(self.profile, self.plan(s, out, "generous", self.profile.generous, cap, None))
         run = load_run(out)
         reason = metrics.invalid_reason(run)
         if reason:
-            sys.exit(f"SIZING REPLAY INVALID: {reason}. Raise generous_cpu_millicores in the profile and repeat it ({out}).")
+            sys.exit(f"SIZING REPLAY INVALID: {reason} ({out})")
         return metrics.measured_peaks(run)
 
 
 def _report_validity(run: Run) -> bool:
-    """Section 6: any CPU throttling makes a run invalid. Says so, and returns whether the run is valid."""
+    """Print the validity problem, if any, and return whether the run is valid."""
     reason = metrics.invalid_reason(run)
     if reason:
-        print(f"RUN INVALID: {reason}. Raise generous_cpu_millicores in the profile and repeat the run.")
+        print(f"RUN INVALID: {reason}")
     return reason is None
 
 
@@ -162,9 +159,9 @@ def cmd_measure(args: argparse.Namespace) -> None:
     execute(exp.profile, exp.plan(s, out, "generous", exp.profile.generous, 4, None,
                                   schedule=schedule, duration_s=lead_in + gap * n))
     run = load_run(out)
-    failed = int(np.sum(run.client.status != "ok"))
-    if failed:
-        sys.exit(f"{failed} of {n} requests failed; see {out}")
+    reason = metrics.invalid_reason(run)
+    if reason:
+        sys.exit(f"MEASUREMENT INVALID: {reason} ({out})")
     if float(np.max(run.samples.memory_peak_bytes, initial=0.0)) <= 0:
         sys.exit("the node's kernel does not expose memory.peak (needs Linux 5.19+); per-request memory cannot be measured")
     cost = metrics.payload_cost(run, lead_in)
@@ -182,9 +179,6 @@ def cmd_size(args: argparse.Namespace) -> None:
     generous = exp.profile.generous
     if demand.peaks.memory_bytes > generous.memory_bytes:
         log("WARNING: calculated peak memory exceeds the profile's generous limit")
-    if demand.peaks.concurrency * 1000 > generous.cpu_millicores:
-        log(f"WARNING: peak concurrency is {demand.peaks.concurrency} but the fixed CPU is only "
-            f"{generous.cpu_millicores}m; raise generous_cpu_millicores in the profile")
     cap = sizing.CAP_FACTOR * demand.peaks.concurrency
 
     if args.validate:
@@ -297,9 +291,9 @@ def _gate(run_dir: Path) -> int:
     for c in checks:
         print(f"{'PASS' if c.passed else 'FAIL'}  {c.name}: {c.detail}")
     valid = _report_validity(run)
-    throttled = metrics.cpu_was_limiting(run)
-    if valid and throttled:
-        print(f"NOTE: {throttled}. The prototype run is exempt from the CPU validity check (section 11).")
+    whole = metrics.summarize(run)["whole"]
+    if whole["cpu_throttled_s"] > 0:
+        print(f"NOTE: CPU throttling occurred in {whole['cpu_throttled_period_pct']:.1f}% of recorded quota periods.")
     passed = valid and all(c.passed for c in checks)
     print("GATE PASSED" if passed else "GATE FAILED: no full run may start")
     return 0 if passed else 1

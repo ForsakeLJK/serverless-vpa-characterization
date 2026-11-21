@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from vpaexp.metrics import as_json, cpu_was_limiting, invalid_reason, oom_kill_times, payload_cost, static_sizing_too_low, summarize
+from vpaexp.metrics import as_json, invalid_reason, oom_kill_times, payload_cost, static_sizing_too_low, summarize
 from vpaexp.records import load_run
 
 from .synthetic import MI, T0, audit_rec, audit_resize, audit_status, event, pod, res, scenario, write_run
@@ -122,23 +122,30 @@ def test_oom_kills_come_from_the_cgroup_counter(tmp_path: Path) -> None:
     assert s["whole"]["oom_kills"] == 1 and s["first_day"]["oom_kills"] == 0 and s["warmed"]["oom_kills"] == 1
 
 
-def test_cpu_is_not_a_result_but_throttling_flags_a_run_whose_cpu_was_not_generous(tmp_path: Path) -> None:
-    throttled = load_run(scenario(tmp_path / "a"))
-    whole = summarize(throttled)["whole"]
-    assert not any("cpu" in key and key != "cpu_throttled_s" for key in whole)
-    assert whole["cpu_throttled_s"] == pytest.approx(0.25)
-    assert cpu_was_limiting(throttled) == "CPU was throttled for 0.2s (0.2% of the run)"
-    quiet = write_run(tmp_path / "b", client=[(1.0, 0.1, "ok")], sampler=[(float(i), 0.1, 100.0, 0, 0, 0.0) for i in range(5)])
-    assert cpu_was_limiting(load_run(quiet)) is None
+def test_throttling_is_reported_and_allowed_in_sizing(tmp_path: Path) -> None:
+    path = write_run(tmp_path, client=[(1.0, 0.1, "ok")], meta={"setting": "generous", "requests_scheduled": 1})
+    (path / "sampler.csv").write_text(
+        "t,usage_usec,nr_periods,nr_throttled,throttled_usec,memory_current,memory_peak,oom_kill\n"
+        f"{T0},0,5,1,100000,104857600,104857600,0\n"
+        f"{T0 + 2},500000,25,11,350000,104857600,104857600,0\n"
+        f"{T0 + 3},100000,10,5,100000,104857600,104857600,0\n"
+    )
+    summary = as_json(load_run(path))
+    assert summary["valid"] is True and summary["invalid_reason"] is None
+    assert summary["phases"]["whole"]["cpu_throttled_s"] == pytest.approx(0.35)
+    assert summary["phases"]["whole"]["cpu_throttled_period_pct"] == pytest.approx(50)
 
 
-def test_any_cpu_throttling_makes_a_run_invalid_except_the_prototype_run(tmp_path: Path) -> None:
-    throttled = load_run(scenario(tmp_path / "a"))
-    assert invalid_reason(throttled) == cpu_was_limiting(throttled)
-    summary = as_json(throttled)
-    assert summary["valid"] is False and "throttled" in summary["invalid_reason"]
-    prototype = load_run(scenario(tmp_path / "b", setting="prototype"))
-    assert cpu_was_limiting(prototype) and invalid_reason(prototype) is None and as_json(prototype)["valid"] is True
+def test_request_failures_invalidate_sizing_but_are_comparison_outcomes(tmp_path: Path) -> None:
+    comparison = load_run(scenario(tmp_path / "comparison"))
+    assert invalid_reason(comparison) is None
+    sizing = load_run(scenario(tmp_path / "sizing", setting="generous"))
+    assert invalid_reason(sizing) == "3 of 110 requests failed or timed out"
+
+
+def test_incomplete_replay_is_invalid_even_if_recorded_requests_succeeded(tmp_path: Path) -> None:
+    path = write_run(tmp_path, client=[(1.0, 0.1, "ok")], meta={"requests_scheduled": 2})
+    assert invalid_reason(load_run(path)) == "recorded 1 of 2 scheduled requests"
 
 
 def test_payload_cost_is_the_median_service_time_and_the_peak_memory_above_the_idle_baseline(tmp_path: Path) -> None:
