@@ -101,17 +101,20 @@ def static_sizing(calc: Peaks, slice_calc: Peaks | None = None, slice_measured: 
 
     `calc` is the calculated peak of the whole window. The validation replay covers a slice
     of it: `slice_calc` is the calculation for that slice and `slice_measured` what the replay
-    showed. They must agree within 10%. Where the replay measured more than calculated, the
-    window peak is raised by the same ratio, since the slice need not contain every window peak.
+    showed. Concurrency must agree within 10%. Measured memory may be lower than predicted
+    and may exceed the prediction by up to 10%. Where the replay measures more than calculated,
+    the window peak is raised by the same ratio, since the slice need not contain every window peak.
     """
     if slice_calc is None or slice_measured is None:
         return sizing_from_peaks(calc)
     raised: dict[str, float] = {}
     for field in ("concurrency", "memory_bytes"):
         c, m = getattr(slice_calc, field), getattr(slice_measured, field)
-        if abs(m - c) > TOLERANCE * c:
+        difference = abs(m - c) if field == "concurrency" else m - c
+        if difference > TOLERANCE * c:
+            problem = "differ by" if field == "concurrency" else "prediction is exceeded by"
             raise ToleranceExceeded(
-                f"{field}: calculated {c:g}, measured {m:g}, differ by more than {TOLERANCE:.0%}; "
+                f"{field}: calculated {c:g}, measured {m:g}, {problem} more than {TOLERANCE:.0%}; "
                 "this window needs a full profiling replay"
             )
         raised[field] = getattr(calc, field) * max(1.0, m / c)

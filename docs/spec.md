@@ -129,8 +129,8 @@ Static memory is sized for the window's peak demand, found by an offline calcula
 **Validation replay.** The calculation does not model allocator overhead or the cost of forking, so it is checked against the real system. For each window, a 1h replay centred on the calculated memory peak runs with a generous memory limit, the fixed CPU and no VPA.
 
 - Every request must succeed in both the one-hour validation replay and the full profiling replay. Request failures and timeouts during the comparison runs are experimental outcomes.
-- The measured peak concurrency and peak memory must each agree with the calculation within 10%.
-- If any does not, that window falls back to a full 24h profiling replay.
+- Measured peak concurrency must be within 10% of the calculation. Measured peak memory may be lower than predicted and may exceed the prediction by up to 10%.
+- A concurrency difference over 10% or a memory underprediction over 10% triggers a full 24h profiling replay.
 
 **Sizing rule.**
 
@@ -141,6 +141,8 @@ Static memory is sized for the window's peak demand, found by an offline calcula
 - The same step yields the peak concurrency used for the concurrency cap.
 
 **Check during the campaign.** If a static run shows an OOM kill, the sizing was too low; it is redone with a full profiling replay and the affected runs are repeated.
+
+**Observed static peak.** Use the full static run's sampled memory peak to estimate a smaller fixed allocation after the run. Keep that estimate distinct from the allocation actually tested. Establish whether the smaller allocation is sufficient with a replay at that allocation.
 
 ### 6.2 VPA default
 

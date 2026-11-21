@@ -75,7 +75,7 @@ uv run vpaexp --profile full --k 96 --keep-every 4 run --setting default --windo
 uv run vpaexp --profile full --k 96 --keep-every 4 report --window A
 ```
 
-If `size --validate` reports a disagreement above 10%, it exits non-zero and that window needs `size --window X --full-profile` (a 24h profiling replay).
+If the measured peak concurrency differs by more than 10%, or measured peak memory exceeds its prediction by more than 10%, use `size --window X --full-profile` (a 24h profiling replay).
 
 ### Arguments
 
@@ -101,11 +101,11 @@ With either option away from its default, output goes to `DIR/<profile>-k<N>[-ke
 | Name | Required | Default | When to use | Meaning |
 |---|---|---|---|---|
 | `--window A\|B` | Yes | none | Always. Size each window once before its runs. | Which trace window to size: A is the 4 trace days from day offset 2, B the 4 from day offset 9. Each replays in 24h at `k = 4`. |
-| `--validate` | No | off | The normal path for the campaign. | Run the 1h validation replay around the calculated memory peak, then save the sizing. Exits non-zero if measurement and calculation disagree by more than 10%. |
+| `--validate` | No | off | The normal path for the campaign. | Run the 1h validation replay around the calculated memory peak and save the sizing if the checks pass. |
 | `--full-profile` | No | off | When `--validate` fails, or a static run reports the sizing as too low. | Run a full 24h profiling replay and size from its measured peaks. |
 | `--write-unvalidated` | No | off | Smoke tests only. | Save the calculation alone, with no replay. `run` warns when it uses such a sizing. |
 
-Every request must succeed in a validation or profiling replay. An error or timeout causes `size` to exit non-zero without writing a sizing file. The 1h validation also requires that both measured peaks agree with the predictions within 10% (§6.1).
+Every request must succeed in a validation or profiling replay. An error or timeout causes `size` to exit non-zero without writing a sizing file. The 1h validation requires peak concurrency to be within 10% of its prediction and peak memory to be at most 10% above its prediction (§6.1).
 
 `--validate`, `--full-profile` and `--write-unvalidated` are mutually exclusive.
 
@@ -152,7 +152,7 @@ Each iteration is a TOML file with a `[flags]` table (see `tuning/example.toml`)
 Places where the spec left a choice open; each is one function, easy to change.
 
 - **Fixed CPU (§6).** The profile's `generous_cpu_millicores` value is the fixed quota. On arm01, use 60000 millicores for all three settings and keep the same NUMA placement. `cpu_throttled_period_pct` is the share of recorded CPU quota periods with throttling. `cpu_throttled_s` is cumulative across CPU run queues.
-- **Validation replay and peaks (§6.1).** The 1h replay is centred on the calculated memory peak and compared with the calculation for that same hour. Where it measures more than calculated, the window's calculated peak is raised by the same ratio (`sizing.static_sizing`).
+- **Validation replay and peaks (§6.1).** The 1h replay is centred on the calculated memory peak and compared with the calculation for that same hour. When a passing replay measures a higher peak, the window's calculated peak is raised by the same ratio. A lower measured memory peak keeps the calculated allocation plus headroom (`sizing.static_sizing`).
 - **Selection rule (§7).** The static p99 and failed-request rate are the worst values over the static repetitions on window A that exist when `tune-select` runs. The failed-request rate is the timeout rate plus the error rate. An iteration's OOM kills include OOM kills of the whole container (`decisions.select_tuned`).
 - **H1 (§1).** A metric is beaten when the median improves by more than the larger of the two min-to-max spreads. H1 is supported if mean memory allocation or p99 is beaten (`decisions.h1`).
 - **Recommendation timestamp (§8.1).** For a resize, "recommendation updated" is the first VPA status write in the latest unbroken run of writes carrying the value that was patched into the pod (`records._recommended_at`).
