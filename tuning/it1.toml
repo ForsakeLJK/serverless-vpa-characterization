@@ -1,0 +1,3 @@
+# Window A, iteration 1. Static r1 peaked at 1,867 MiB.
+[flags]
+pod-recommendation-min-memory-mb = "2048"

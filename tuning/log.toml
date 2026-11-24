@@ -7,3 +7,15 @@
 # observation = "what the previous run got wrong"
 # knob = "flag=value, and why"
 # result = "what changed"
+
+[[iteration]]
+name = "it1"
+observation = "Default r1 shrank to 250 MiB and recorded six OOM exits and 131 errors. Static r1 served the same arrivals without failures and peaked at 1,867 MiB."
+knob = "Raise pod-recommendation-min-memory-mb from 250 to 2048 to give bursts about 10% headroom over the observed static peak."
+result = "Pending"
+
+[[iteration]]
+name = "it2"
+observation = "Default r1 held the 2,176 MiB target for the final 13 hours. The default aggregation interval is six wall-clock hours."
+knob = "Shorten memory-aggregation-interval to five wall-clock minutes so quiet intervals contribute separate peaks. Compare against default r1."
+result = "Mean allocation fell from 1,863 to 812 MiB. The tuned run counted 57 OOM kills, 56 container restarts, and 4,771 errors among 52,092 requests. Successful-request p99 was 1.348 s. The iteration failed the static service-quality criterion."

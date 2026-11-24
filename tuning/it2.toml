@@ -1,0 +1,4 @@
+# Window A. Give sustained quiet periods their own peak observations.
+# Five minutes of replay wall time represents twenty minutes of trace time at k=4.
+[flags]
+memory-aggregation-interval = "5m0s"
