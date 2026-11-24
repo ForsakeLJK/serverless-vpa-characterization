@@ -19,11 +19,14 @@ from vpaexp.cluster import Profile
 from vpaexp.config import Allocation
 from vpaexp.records import Run, load_run
 from vpaexp.run import RunPlan, Setting, execute, log, write_json
-from vpaexp.trace import DAY_S, K, WINDOWS, Slice, busiest_slice, days, extract_arrivals, load_arrivals, replay_schedule, save_arrivals
+from vpaexp.trace import DAY_S, FUNC_PREFIX, K, WINDOWS, Slice, busiest_slice, days, extract_arrivals, load_arrivals, replay_schedule, save_arrivals
 from vpaexp.trace import Floats
 
 TRACE = Path("azure-trace/AzureFunctionsInvocationTraceForTwoWeeksJan2021.txt")
-ARRIVALS = Path("data/arrivals.txt.gz")
+TRACE_INPUTS = {
+    "target": (FUNC_PREFIX, Path("data/arrivals.txt.gz")),
+    "neighbor": ("155e47f8e7f751d0c845049456d01832013c61336a8cd85901330ac821a71534", Path("data/neighbor-arrivals.txt.gz")),
+}
 SETTINGS = ("static", "default", "tuned")
 REPETITIONS = 3  # section 10
 
@@ -41,7 +44,11 @@ class Experiment:
         # rehearsal (k = 96) never mixes with the k = 4 campaign in sizing, runs or reports.
         self.testbed_root = Path(args.results) / self.profile.name
         self.root = Path(args.results) / (self.profile.name + self.compression_suffix())
-        self.arrivals = load_arrivals(ARRIVALS)
+        self.trace_name: str = args.trace
+        self.func_prefix, arrivals_path = TRACE_INPUTS[self.trace_name]
+        if self.trace_name != "target":
+            self.root = self.root / self.trace_name
+        self.arrivals = load_arrivals(arrivals_path)
         if self.root != self.testbed_root:
             log(f"compression k = {self.k}, keeping every {self.keep_every} arrival(s); results under {self.root}")
 
@@ -118,7 +125,7 @@ class Experiment:
             duration_s=s.replay_duration_s(self.k) if duration_s is None else duration_s,
             allocation=alloc, concurrency_cap=cap, flags=flags, service_s=self.payload_cost().service_s,
             phase_boundary_s=phase_boundary_s, poll_metrics_api=poll_metrics_api,
-            extra={"keep_every": self.keep_every, **(extra or {})},
+            extra={"trace": self.trace_name, "trace_func_prefix": self.func_prefix, "keep_every": self.keep_every, **(extra or {})},
         )
 
     def sizing_replay(self, s: Slice, name: str, cap: int) -> sizing.Peaks:
@@ -144,9 +151,12 @@ def _report_validity(run: Run) -> bool:
 
 
 def cmd_extract(args: argparse.Namespace) -> None:
-    arrivals = extract_arrivals(TRACE)
-    save_arrivals(ARRIVALS, arrivals)
-    print(f"{len(arrivals)} arrivals written to {ARRIVALS}")
+    prefix, path = TRACE_INPUTS[args.trace]
+    arrivals = extract_arrivals(TRACE, prefix)
+    if not len(arrivals):
+        sys.exit(f"No arrivals found for {prefix} in {TRACE}")
+    save_arrivals(path, arrivals)
+    print(f"{len(arrivals)} arrivals written to {path}")
 
 
 def cmd_measure(args: argparse.Namespace) -> None:
@@ -175,7 +185,7 @@ def cmd_size(args: argparse.Namespace) -> None:
     exp = Experiment(args)
     window = WINDOWS[args.window]
     demand = exp.demand(window)
-    record: dict[str, Any] = {"window": window.name, "k": exp.k, "keep_every": exp.keep_every, "payload_cost": asdict(exp.payload_cost()), "demand": demand.to_json()}
+    record: dict[str, Any] = {"window": window.name, "trace": exp.trace_name, "trace_func_prefix": exp.func_prefix, "requests_scheduled": len(exp.schedule(window)), "k": exp.k, "keep_every": exp.keep_every, "payload_cost": asdict(exp.payload_cost()), "demand": demand.to_json()}
     generous = exp.profile.generous
     if demand.peaks.memory_bytes > generous.memory_bytes:
         log("WARNING: calculated peak memory exceeds the profile's generous limit")
@@ -212,6 +222,8 @@ def _load_sizing(exp: Experiment, window: str) -> sizing.Sizing:
     if not path.exists():
         sys.exit(f"no sizing for window {window}; run: vpaexp size --window {window} --validate")
     record = json.loads(path.read_text())
+    if record.get("trace", "target") != exp.trace_name:
+        sys.exit(f"{path} was sized for a different trace")
     sized_at = (record.get("k", K), record.get("keep_every", 1))
     if sized_at != (exp.k, exp.keep_every):
         sys.exit(f"{path} was sized at k = {sized_at[0]}, keep every {sized_at[1]}; this run uses "
@@ -378,6 +390,7 @@ def cmd_tuning_log(args: argparse.Namespace) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(prog="vpaexp", description=__doc__)
     p.add_argument("--profile", default="prototype", help="cluster/<profile>.toml (prototype or full)")
+    p.add_argument("--trace", choices=sorted(TRACE_INPUTS), default="target", help="Azure arrival stream to replay")
     p.add_argument("--results", default="results")
     p.add_argument("--k", type=int, default=K,
                    help=f"time compression factor (default {K}, the campaign). VPA durations are divided by it")

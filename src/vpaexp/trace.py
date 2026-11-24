@@ -35,16 +35,16 @@ def days(name: str, first_day: int, count: int) -> Slice:
 WINDOWS = {"A": days("A", 2, 4), "B": days("B", 9, 4)}
 
 
-def extract_arrivals(trace_path: Path) -> Floats:
-    """Sorted arrival times (end_timestamp - duration) of the function whose id starts with FUNC_PREFIX."""
+def extract_arrivals(trace_path: Path, func_prefix: str = FUNC_PREFIX) -> Floats:
+    """Sorted arrival times (end_timestamp - duration) of the function whose id starts with func_prefix."""
     out: list[float] = []
-    needle = "," + FUNC_PREFIX
+    needle = "," + func_prefix
     with open(trace_path) as f:
         for line in f:
             if needle not in line:
                 continue
             _app, func, end, duration = line.rstrip("\n").split(",")
-            if func.startswith(FUNC_PREFIX):
+            if func.startswith(func_prefix):
                 out.append(float(end) - float(duration))
     return np.sort(np.array(out, dtype=np.float64))
 

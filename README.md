@@ -65,6 +65,17 @@ uv run vpaexp --profile full run --setting tuned   --window A --label it1 --conf
 uv run vpaexp --profile full run --setting static  --window A --rep 1
 ```
 
+### Window A neighbor calibration on ARM
+
+From the repo root, use the existing full profile and measured payload cost. Run sequentially on the idle campaign node with its original memory budget. The bundled neighbor arrivals select Azure function `155e47f8e7f7…`. Window A contains 151,104 requests.
+
+```bash
+uv run vpaexp --profile full --trace neighbor size --window A --validate
+uv run vpaexp --profile full --trace neighbor run --setting default --window A --rep 1
+```
+
+Start the second command after sizing succeeds. If the sizing tolerance check fails, replace `--validate` with `--full-profile` and complete that replay first. Neighbor sizing and runs are under `results/full/neighbor/`. This calibration uses the neighbor alone and starts it at its own sized allocation.
+
 ### Rehearsal: the whole campaign at 1h per run
 
 The same commands with `--k 96 --keep-every 4` before the command name. Each four-day window replays in 1h, so the validation replay of `size --validate` covers the whole window. This checks the campaign end to end (sizing, tuning, both comparisons, reports, per-run overhead, disk use) in about a day. Its numbers are not results: at `k = 96` the VPA loops run 24× slower than the `k = 4` principle asks, and tuned durations do not carry over to `k = 4`. Keep its tuning files apart from `tuning/`.

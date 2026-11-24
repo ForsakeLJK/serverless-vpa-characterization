@@ -1,12 +1,12 @@
 # Experiment specification: Kubernetes VPA (InPlace) under a serverless workload
 
-Status: agreed design, implemented in this repository. Written 2026-11-12, revised the same day to `k = 4`, four-day windows and a SeBS workload function. Revised 2026-11-16: VPA controls memory only and CPU is fixed and generous in every setting. Target venue: ISPASS 2027.
+Status: the original single-function design is implemented in this repository. The window A contention experiment (RQ4) is specified for a subsequent campaign. Written 2026-11-12, revised the same day to `k = 4`, four-day windows and a SeBS workload function. Revised 2026-11-16: VPA controls memory only and CPU is fixed and generous in every setting. Target venue: ISPASS 2027.
 
 Items marked **[verify]** are assumptions, single measurements or derivations that must be confirmed before the full runs. They are collected in section 13.
 
 ## 1. Goal, hypothesis and research questions
 
-Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on a single serverless function driven by real arrival times. Findings come from the results.
+Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on a single serverless function driven by real arrival times. A second experiment studies two independently autoscaled functions sharing a constrained node memory budget (section 6.5).
 
 **Scope: memory only.** VPA controls the function's memory. Each comparison uses the same fixed CPU quota and NUMA placement. The experiment measures memory autoscaling behavior under that quota, with CPU throttling recorded as context. CPU autoscaling is future work (section 15).
 
@@ -17,6 +17,7 @@ Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on 
 - **RQ1**: How well does the recommender track serverless memory demand (slack and under-provisioning over time)?
 - **RQ2**: How long does the InPlace pipeline take from recommendation to pod patch to kubelet-applied, and how often does it fail or defer?
 - **RQ3**: What is the net effect on tail latency and memory efficiency versus static allocation, and how sensitive is it to configuration?
+- **RQ4**: When two independently managed VPAs compete for a constrained node memory budget, how do their memory recommendations translate into applied allocations over time, and how does that interaction affect each function’s tail latency, successful throughput and failed-request rate?
 
 **Hypothesis H1: best VPA performance requires hand-tuning.**
 
@@ -39,7 +40,7 @@ Characterize the Kubernetes Vertical Pod Autoscaler, in InPlace update mode, on 
 | Client placement | Mac host | Same machine, on NUMA node 1 |
 | Function pod and Kubernetes | The VM | NUMA node 0 |
 
-- Single tenant: nothing else runs on the node during a run.
+- RQ1–RQ3 use an isolated function. RQ4 adds exactly one co-located workload in its neighbor-present conditions.
 - The full-run machine is not reachable from the development session. The experimenter runs the campaign and brings the results back (section 9).
 - The VPA updater and admission controller run with `--feature-gates=InPlace=true`.
 - Objects currently on the minikube cluster (`primes-vpa`, `base64-vpa`, the `vpaexp-sampler` pod, shortened recommender flags) are not part of this project. Everything is defined from scratch in this repo.
@@ -112,7 +113,7 @@ Estimated CPU demand at `k = 4`, from per-minute counts and the 0.33 s Mac servi
 
 ## 6. Settings
 
-All three settings use the same window, the same payload, the same initial memory allocation and the same fixed CPU.
+The three original settings use the same window, the same payload, the same initial memory allocation and the same fixed CPU.
 
 **Fixed CPU.** The pod's CPU request and limit are set once per testbed in the cluster profile and are identical in every setting. The arm01 comparison uses 60000 millicores. CPU throttling is recorded for interpretation and is allowed in every setting.
 
@@ -186,6 +187,29 @@ The configuration chosen by the procedure in section 7.
 - `maxAllowed` (memory): node allocatable memory minus a fixed system reserve **[verify value]**, the same for both settings.
 - `minReplicas: 1` in the update policy. The updater skips workloads with fewer replicas than its `--min-replicas` flag (default 2); the per-object setting lets it act on the single function pod without changing a component flag.
 - Initial pod allocation: the static memory allocation for that window, and the fixed CPU.
+
+### 6.5 Two functions sharing a constrained memory budget (RQ4)
+
+**Workloads.** On window A, deploy two separate single-replica PageRank Deployments with separate Services. The target keeps its original arrivals. Drive the neighbor with the arrivals of a different Azure function from days 2–5, replayed on the same clock at `k = 4`. Both serve the same SeBS payload through the existing wrapper. Overlapping invocations drive memory demand in both pods. Use Azure function `155e47f8e7f751d0c845049456d01832013c61336a8cd85901330ac821a71534`, from a different Azure application. Preserve both streams’ original timestamps, including idle periods.
+
+**Neighbor selection.** We screened the 29 other application/function pairs with at least 500 arrivals in window A and traffic on all four days. We ranked them by cumulative replay time during which each pod would have at least three requests in flight, assuming 0.33 s per PageRank invocation at `k = 4`. The volume cutoff and three-request threshold are workload-selection choices. The selected trace gives 122.23 s of modeled overlap across the four days, versus 4.13 s for the runner-up. It has 151,104 arrivals and a modeled peak concurrency of 16, compared with 52,092 and 17 for the target. The largest simultaneous total is 18. Only arrival times are borrowed. Check the overlap estimate using measured ARM service times and validate competing memory requests in the budget pilot below.
+
+| Condition | Target policy | Neighbor policy |
+|---|---|---|
+| Isolated static | Static | Absent |
+| Isolated VPA | Default memory-only InPlace VPA | Absent |
+| Static with neighbor | Static | Default memory-only InPlace VPA |
+| Two VPAs | Default memory-only InPlace VPA | Separate default memory-only InPlace VPA |
+
+Each VPA targets only its own Deployment, using sections 6.2 and 6.4. The two objects share the stock cluster components. Size the target's initial allocation as in section 6.1. Profile the neighbor separately to establish its concurrency cap and a startup allocation sufficient to serve its initial load. Freeze its initial allocation across neighbor-present runs. Use the same priorities and Guaranteed QoS for both functions.
+
+**Memory budget.** Restrict the memory allocatable to pods on the Kubernetes node and record the effective value. Calibrate one budget for all four conditions. Account for system pods, eviction headroom and the section 6.4 reserve when setting the per-object ceiling. Verify that both pods can start together and each can serve its own trace alone. Compare projected simultaneous memory requests from isolated pilot replays with the capacity available to the two pods. If their requests fit throughout, document that result and revisit the budget or trace before freezing the design. Avoid selecting parameters from observed latency or requiring a deferred resize for a run to count.
+
+**CPU and placement.** Keep client placement and the target's CPU quota and placement identical in all four conditions. The existing 60-core target quota and 64-core workload NUMA domain leave little room for another CPU-intensive function. In the pilot, select fixed CPU allocations and placement that accommodate both functions, then check per-pod throttling and isolated versus co-located service times with ample memory. If CPU or node configuration changes, collect isolated controls with the RQ4 configuration.
+
+**Execution and evidence.** Start each repetition with fresh pods and cleared VPA histories for both workloads. Replay both streams open-loop from a common time origin, logging sends, outcomes and completion times separately. For each pod, collect the section 8 series, including usage, requested and kubelet-applied memory, and, when managed by VPA, target, bounds and resize timestamps. Record node allocatable memory, other pods' allocated requests, node available memory and memory-pressure events. Distinguish capacity committed to pods from memory in use. For each pending increase, report its size, duration and kubelet reason, including increases still pending at run end. A recommendation alone does not establish that a resize was attempted.
+
+**Analysis.** For the target, calculate the neighbor-present minus isolated change in p99, successful throughput and timeout and error rates under each policy. Compare those changes across policies. For the neighbor, compare the same metrics between the static-target and two-VPA conditions. Plot both pods' allocations, recommendations and usage against the shared budget on one time axis, with resize decisions, OOM events and each function's service metrics aligned. Examine whether an outstanding increase becomes feasible after the other pod releases memory. Report intervals with ample headroom as well as periods of competition, and retain the whole-run and phase summaries from section 8.
 
 ## 7. Tuning procedure
 
@@ -261,6 +285,8 @@ Repetition rule: every setting that appears in a results figure gets 3 repetitio
 | Transfer on B (3 settings × 3 repetitions) | 9 | 216h |
 | **Total** | **21 full runs, 2 short** | **506h, about 21 days** |
 
+**RQ4 campaign (additional).** Window A only, four conditions from section 6.5, three 24h repetitions per condition. Budget 12 full runs (288h) plus calibration and reset time. Existing isolated repetitions can count only if the RQ4 budget, placement, workload configuration and instrumentation match. If all six isolated repetitions qualify, six new full runs (144h) remain.
+
 **Rehearsal.** Before the campaign, the whole run plan is executed once at `k = 96` with every 4th arrival kept, so each window replays in 1h with peak concurrency close to `k = 4` (19 and 32 against 17 and 25). It checks the campaign end to end and measures per-run overhead. Its results are not reported: VPA's loop intervals sit at the 15s floor, 24× slower than the design principle asks.
 
 Per-run reset and collection overhead is extra and not yet measured. A window whose validation replay fails the 10% tolerance adds a 24h profiling replay. The first default run on A doubles as the starting observation for tuning.
@@ -290,8 +316,11 @@ Figures 1–5 mark every OOM kill. Figures are rendered at 300 dpi, and every ru
 8. Transfer: figure 7 for window B.
 9. Tuning log table: iteration, observation, knob changed, result.
 
+10. Window A contention: aligned two-pod timelines and service comparisons defined in section 6.5, with median and min-to-max range across three repetitions per condition.
+
 ## 13. Items to verify before full runs
 
+- **RQ4 pilot**: validate the selected trace on ARM and freeze the neighbor startup allocation, effective node memory budget, per-object ceiling and CPU placement. Confirm that both workload log streams and resize events can be attributed to the correct pod.
 - **Payload cost**: re-measure pagerank's service time and memory per invocation at the `large` size on the ARM server, in a container. The duration match with the trace function and all demand estimates in section 4 depend on it.
 - **Fixed CPU and NUMA placement**: confirm that the quota and placement are identical for all comparison runs.
 - **Concurrency cap factor**: 4× is a judgment call. Consider one run at a different factor to show the results do not hinge on it.
@@ -312,7 +341,7 @@ Figures 1–5 mark every OOM kill. Figures are rendered at 300 dpi, and every ru
 - **Tuned is in-sample on window A** by design (H1). Window B measures transfer only against static and default, not against B's own best configuration.
 - **Tuning cannot explore faster loops**, because 15s is already the practical floor of the metrics path.
 - **Memory only.** The comparison measures memory autoscaling under the testbed's fixed CPU quota. Memory settings can affect latency through changes in request overlap and CPU throttling, as well as OOM kills and restarts.
-- **One function, one pod, one payload, one trace function.** Results do not cover horizontal scaling, multi-tenancy or other workload shapes.
+- **Workload coverage.** RQ1–RQ3 use one function and one trace. RQ4 covers two instances of the same function, one pair of arrival traces and one calibrated budget on window A. All experiments use one replica per Deployment.
 - **No scale-to-zero.** The pod stays alive through idle periods, which are most of each run. Idle-time cost is not compared against a platform that scales idle functions to zero.
 - **Concurrency inside one pod, warm invocations only.** Both differ from how a FaaS platform runs SeBS functions (section 3).
 - **Compute-bound function only.** Nothing in the request path waits on storage or the network, so these results do not carry over to I/O-heavy functions.
@@ -321,6 +350,8 @@ Figures 1–5 mark every OOM kill. Figures are rendered at 300 dpi, and every ru
 - **Client and server share one machine** in the full runs, separated by NUMA node.
 
 ## 15. Future work
+
+- Memory bandwidth contention: investigate interference from concurrent memory access in a subsequent experiment. RQ4 varies memory capacity.
 
 - CPU autoscaling: let VPA control CPU as well. It needs a definition of CPU demand that accounts for latency, and a measured CPU cost per request.
 - Eight-day runs (48h each at `k = 4`), to exercise VPA's full 8-interval memory window.
