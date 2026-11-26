@@ -203,7 +203,9 @@ The configuration chosen by the procedure in section 7.
 
 Each VPA targets only its own Deployment, using sections 6.2 and 6.4. The two objects share the stock cluster components. Size the target's initial allocation as in section 6.1. Profile the neighbor separately to establish its concurrency cap and a startup allocation sufficient to serve its initial load. Freeze its initial allocation across neighbor-present runs. Use the same priorities and Guaranteed QoS for both functions.
 
-**Memory budget.** Restrict the memory allocatable to pods on the Kubernetes node and record the effective value. Calibrate one budget for all four conditions. Account for system pods, eviction headroom and the section 6.4 reserve when setting the per-object ceiling. Verify that both pods can start together and each can serve its own trace alone. Compare projected simultaneous memory requests from isolated pilot replays with the capacity available to the two pods. If their requests fit throughout, document that result and revisit the budget or trace before freezing the design. Avoid selecting parameters from observed latency or requiring a deferred resize for a run to count.
+**Memory budget.** Use a shared workload budget of 6.5 GiB (6,656 MiB) in all four comparison conditions. This is the effective node allocatable memory available to the function pods after accounting for other pods' requests. Record node reservations, eviction headroom, other pod requests and each VPA's per-object ceiling. Verify the effective budget on ARM.
+
+The isolated window A runs started at 2,565 MiB for the target and 3,697 MiB for the neighbor. Keep these startup allocations for the pilot. Together they leave 394 MiB free. Aligned by elapsed replay time, their applied allocations first exceed the budget at 13:10:01, reaching 7,447 MiB combined (791 MiB above budget, rounded). Use this timestamp to examine the two-pod run. Actual resize timing and outcomes are measured during replay.
 
 **CPU and placement.** Keep client placement and the target's CPU quota and placement identical in all four conditions. The existing 60-core target quota and 64-core workload NUMA domain leave little room for another CPU-intensive function. In the pilot, select fixed CPU allocations and placement that accommodate both functions, then check per-pod throttling and isolated versus co-located service times with ample memory. If CPU or node configuration changes, collect isolated controls with the RQ4 configuration.
 
@@ -320,7 +322,7 @@ Figures 1–5 mark every OOM kill. Figures are rendered at 300 dpi, and every ru
 
 ## 13. Items to verify before full runs
 
-- **RQ4 pilot**: validate the selected trace on ARM and freeze the neighbor startup allocation, effective node memory budget, per-object ceiling and CPU placement. Confirm that both workload log streams and resize events can be attributed to the correct pod.
+- **RQ4 pilot**: verify simultaneous startup, the effective 6,656 MiB workload budget, per-object ceilings and CPU placement. Confirm that both workload log streams and resize events can be attributed to the correct pod.
 - **Payload cost**: re-measure pagerank's service time and memory per invocation at the `large` size on the ARM server, in a container. The duration match with the trace function and all demand estimates in section 4 depend on it.
 - **Fixed CPU and NUMA placement**: confirm that the quota and placement are identical for all comparison runs.
 - **Concurrency cap factor**: 4× is a judgment call. Consider one run at a different factor to show the results do not hinge on it.
