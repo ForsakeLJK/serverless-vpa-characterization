@@ -1,8 +1,12 @@
 # Reproducing the Kubernetes VPA experiments
 
-The window A experiment compares fixed memory allocation with two configurations of the Kubernetes Vertical Pod Autoscaler (VPA) under the same Azure Functions arrival trace. Follow steps 1 through 4 to reproduce the [window A report](docs/window-a/report.md). With the archived runs, start at step 4. Steps 5 through 7 extend the comparison to three repetitions per setting on two trace windows.
+The window A experiment compares fixed memory allocation with two configurations of the Kubernetes Vertical Pod Autoscaler (VPA) under the same Azure Functions arrival trace. Follow steps 1 through 4 to reproduce the results. With the archived runs, start at step 4. Steps 5 through 7 extend the comparison to three repetitions per setting on two trace windows.
 
 Run commands from the repository root. Run each replay on an idle node and wait for it to finish before starting the next.
+
+## Declaration of Generative AI Usage
+
+Claude Opus and GPT Astra were used to implement the codebase.
 
 ## 1. Prepare the cluster
 
