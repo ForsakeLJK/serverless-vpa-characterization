@@ -1,6 +1,6 @@
 # Kubernetes VPA Characterization on Serverless Functions 
 
-The current experiment compares fixed memory allocation with two configurations of the Kubernetes Vertical Pod Autoscaler (VPA) under the same Azure Functions arrival trace, with PageRank function selected from [SeBS benchmark](https://github.com/spcl/serverless-benchmarks). Follow steps 1 through 4 to reproduce the results. With the archived runs, start at step 4. Steps 5 through 7 extend the comparison to three repetitions per setting on two trace windows.
+The current experiment compares fixed memory allocation with two configurations of the Kubernetes Vertical Pod Autoscaler (VPA) under the same [Azure Functions](https://github.com/Azure/AzurePublicDataset/blob/master/AzureFunctionsInvocationTrace2021.md) arrival trace, with PageRank function selected from [SeBS benchmark](https://github.com/spcl/serverless-benchmarks). Follow steps 1 through 4 to reproduce the results. With the archived runs, start at step 4. Steps 5 through 7 extend the comparison to three repetitions per setting on two trace windows.
 
 Run commands from the repository root. Run each replay on an idle node and wait for it to finish before starting the next.
 
