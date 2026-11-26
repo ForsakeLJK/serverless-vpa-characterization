@@ -14,8 +14,8 @@ from typing import Any
 
 import numpy as np
 
-from vpaexp import config, decisions, figures, metrics, sizing
-from vpaexp.cluster import Profile
+from vpaexp import config, decisions, figures, metrics, rq4, sizing
+from vpaexp.cluster import Kubectl, Profile
 from vpaexp.config import Allocation
 from vpaexp.records import Run, load_run
 from vpaexp.run import RunPlan, Setting, execute, log, write_json
@@ -275,6 +275,40 @@ def cmd_run(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_rq4_budget(args: argparse.Namespace) -> None:
+    profile = Profile.load(Path("cluster/full.toml"))
+    print(json.dumps(rq4.reservation_plan(Kubectl(profile.context, profile.namespace)), indent=2))
+
+
+def cmd_rq4(args: argparse.Namespace) -> None:
+    if args.profile != "full" or args.trace != "target" or args.keep_every != 1 or args.k != K:
+        sys.exit("rq4 uses --profile full, window A at k=4, and the complete trace streams")
+    duration = WINDOWS["A"].replay_duration_s()
+    if args.limit_s is not None:
+        if not 0 < args.limit_s <= duration:
+            sys.exit("--limit-s must be positive and within window A")
+        duration = args.limit_s
+    exp = Experiment(args)
+    condition = f"{args.setting}-{args.neighbor}-{'ample' if args.ample_memory else '6656Mi'}"
+    if args.limit_s:
+        condition += "-smoke"
+    root = exp.root / "rq4" / f"{condition}-r{args.rep}-{time.strftime('%Y%m%d-%H%M%S')}"
+    plans = {}
+    for trace, app in (("target", config.APP), ("neighbor", rq4.NEIGHBOR)):
+        if trace == "neighbor" and args.neighbor == "absent":
+            continue
+        stream = exp if trace == "target" else Experiment(argparse.Namespace(**(vars(args) | {"trace": trace})))
+        size = _load_sizing(stream, "A")
+        schedule = stream.schedule(WINDOWS["A"])
+        setting: Setting = args.setting if trace == "target" else "default"
+        plans[app] = stream.plan(WINDOWS["A"], root / trace, setting,
+                                 Allocation(rq4.CPU_M, size.memory_bytes), size.concurrency_cap,
+                                 _flags(setting, None, K), schedule=schedule[schedule < duration],
+                                 duration_s=duration, rep=args.rep, phase_boundary_s=DAY_S / K,
+                                 extra={"condition": condition})
+    rq4.execute_rq4(exp.profile, plans, root, args.ample_memory)
+
+
 def cmd_prototype(args: argparse.Namespace) -> None:
     """Section 11: a 30-minute pipeline check on a busy 2h slice of day 2, with shortened VPA windows."""
     exp = Experiment(args)
@@ -422,6 +456,14 @@ def main() -> None:
     c.add_argument("--config", help="tuned only: TOML file with a [flags] table of declared knobs")
     c.add_argument("--label", help="run label instead of r<rep>, e.g. it1 for a tuning iteration")
     c.add_argument("--limit-s", type=float, help="smoke test: replay only the first N seconds")
+
+    command("rq4-budget", cmd_rq4_budget, "calculate the ARM kubelet reservation on the idle testbed")
+    c = command("rq4", cmd_rq4, "replay window A with a 30-CPU target and optional VPA neighbor")
+    c.add_argument("--setting", choices=("default", "static"), default="default")
+    c.add_argument("--neighbor", choices=("present", "absent"), default="present")
+    c.add_argument("--rep", type=int, default=1)
+    c.add_argument("--limit-s", type=float)
+    c.add_argument("--ample-memory", action="store_true", help="run the pilot with ample available node memory")
 
     c = command("prototype", cmd_prototype, "the 30-minute prototype run, then the gate")
 

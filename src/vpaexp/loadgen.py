@@ -26,19 +26,20 @@ def run_replay(
     expected_result: float | None = None,
 ) -> float:
     """Send one request per schedule entry (seconds from now). Returns the epoch time of replay start."""
-    return asyncio.run(_replay(url, schedule, payload, timeout_s, log_path, expected_result))
+    return asyncio.run(replay_async(url, schedule, payload, timeout_s, log_path, expected_result))
 
 
-async def _replay(
+async def replay_async(
     url: str,
     schedule: Floats,
     payload: dict[str, Any],
     timeout_s: float,
     log_path: Path,
     expected_result: float | None,
+    origin: tuple[float, float] | None = None,
 ) -> float:
     loop = asyncio.get_running_loop()
-    epoch0, mono0 = time.time(), loop.time()
+    epoch0, mono0 = origin or (time.time(), loop.time())
 
     def epoch(mono: float) -> float:
         return epoch0 + (mono - mono0)

@@ -152,12 +152,12 @@ def updater_args(flags: VpaFlags) -> list[str]:
     return _BASE_ARGS + ["--feature-gates=InPlace=true"] + [f"--{f}={v}" for f, v in sorted(flags.updater.items())]
 
 
-def deployment_manifest(namespace: str, image: str, allocation: Allocation, concurrency_cap: int) -> dict[str, Any]:
-    labels = {"app": APP}
+def deployment_manifest(namespace: str, image: str, allocation: Allocation, concurrency_cap: int, app: str = APP) -> dict[str, Any]:
+    labels = {"app": app}
     return {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
-        "metadata": {"name": APP, "namespace": namespace, "labels": labels},
+        "metadata": {"name": app, "namespace": namespace, "labels": labels},
         "spec": {
             "replicas": 1,
             "strategy": {"type": "Recreate"},
@@ -187,27 +187,27 @@ def deployment_manifest(namespace: str, image: str, allocation: Allocation, conc
     }
 
 
-def service_manifest(namespace: str) -> dict[str, Any]:
+def service_manifest(namespace: str, app: str = APP, node_port: int = NODE_PORT) -> dict[str, Any]:
     return {
         "apiVersion": "v1",
         "kind": "Service",
-        "metadata": {"name": APP, "namespace": namespace},
+        "metadata": {"name": app, "namespace": namespace},
         "spec": {
             "type": "NodePort",
-            "selector": {"app": APP},
-            "ports": [{"port": FUNCTION_PORT, "targetPort": FUNCTION_PORT, "nodePort": NODE_PORT}],
+            "selector": {"app": app},
+            "ports": [{"port": FUNCTION_PORT, "targetPort": FUNCTION_PORT, "nodePort": node_port}],
         },
     }
 
 
-def vpa_manifest(namespace: str, max_memory_bytes: int) -> dict[str, Any]:
+def vpa_manifest(namespace: str, max_memory_bytes: int, app: str = APP) -> dict[str, Any]:
     """VPA controls memory only (section 6.4); the pod's CPU stays at its fixed, generous value."""
     return {
         "apiVersion": "autoscaling.k8s.io/v1",
         "kind": "VerticalPodAutoscaler",
-        "metadata": {"name": APP, "namespace": namespace},
+        "metadata": {"name": app, "namespace": namespace},
         "spec": {
-            "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": APP},
+            "targetRef": {"apiVersion": "apps/v1", "kind": "Deployment", "name": app},
             # minReplicas: the updater skips workloads below its --min-replicas (default 2);
             # the per-object override lets it act on the single function pod.
             "updatePolicy": {"updateMode": "InPlace", "minReplicas": 1},
@@ -225,12 +225,12 @@ def vpa_manifest(namespace: str, max_memory_bytes: int) -> dict[str, Any]:
     }
 
 
-def sampler_manifest(namespace: str, image: str, container_id: str) -> dict[str, Any]:
+def sampler_manifest(namespace: str, image: str, container_id: str, name: str = "sampler", memory_mib: int = 64) -> dict[str, Any]:
     """The cgroup sampler: a pod on the node that reads the function container's cgroup files."""
     return {
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {"name": "sampler", "namespace": namespace, "labels": {"app": "sampler"}},
+        "metadata": {"name": name, "namespace": namespace, "labels": {"app": "sampler"}},
         "spec": {
             "restartPolicy": "Never",
             "terminationGracePeriodSeconds": 2,
@@ -241,7 +241,7 @@ def sampler_manifest(namespace: str, image: str, container_id: str) -> dict[str,
                     "imagePullPolicy": "IfNotPresent",
                     "command": ["python", "/app/sampler.py", "--cgroup-root", "/host-cgroup",
                                 "--container-id", container_id, "--out", "/data/sampler.csv"],
-                    "resources": {"requests": {"cpu": "50m", "memory": "64Mi"}},
+                    "resources": {"requests": {"cpu": "50m", "memory": f"{memory_mib}Mi"}},
                     "volumeMounts": [
                         {"name": "cgroup", "mountPath": "/host-cgroup", "readOnly": True},
                         {"name": "data", "mountPath": "/data"},

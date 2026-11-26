@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -93,6 +96,18 @@ def clean_state(kc: Kubectl, flags: VpaFlags | None) -> None:
                namespaced=False)
 
 
+@contextmanager
+def cluster_run_lock() -> Iterator[None]:
+    """Serialize local replays and kubelet budget changes on the experiment host."""
+    with Path(f"/tmp/vpaexp-rq4-budget-{os.getuid()}.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("another experiment or budget change is running") from exc
+        yield
+
+
+@cluster_run_lock()
 def execute(profile: Profile, plan: RunPlan) -> Path:
     out = plan.out_dir
     out.mkdir(parents=True, exist_ok=False)

@@ -116,3 +116,30 @@ uv run vpaexp --profile full --k 96 --keep-every 4 size --window A --validate
 uv run vpaexp --profile full --k 96 --keep-every 4 run --setting default --window A --rep 1
 uv run vpaexp --profile full --k 96 --keep-every 4 report --window A
 ```
+
+## RQ4: two functions sharing 6.5 GiB on ARM
+
+Use the checkout and `--results` root containing the measured payload cost and both window A sizing files. The examples use `results-window-a/full/`. Run sequentially on the dedicated node. Each function requests and is limited to 30 CPUs. The target and neighbor use separate Services (NodePorts 30080 and 30081), VPA objects and cgroup samplers. The target alone also uses 30 CPUs in RQ4.
+
+First run a ten-minute pilot with the original node memory configuration. It resets the prior experiment, checks the available CPU, replays both traces from a common clock and removes the experiment pods when finished.
+
+```bash
+uv run vpaexp --profile full --results results-window-a rq4 --ample-memory --limit-s 600
+```
+
+On the kubeadm node, inspect the proposed reservation and apply it between runs. The helper uses the full profile's kubectl context, `sudo`, `flock` and the system Python's PyYAML (`python3-yaml` on Ubuntu). It backs up `/var/lib/kubelet/config.yaml`, changes `systemReserved.memory`, and restarts kubelet. For this request-capacity experiment it sets `enforceNodeAllocatable: [none]` so the reservation affects advertised allocatable without imposing a small aggregate physical memory limit on the control plane. Individual container limits remain enforced. The helper verifies the live capacity and restores the configuration if verification fails.
+
+```bash
+scripts/rq4-budget.sh plan
+scripts/rq4-budget.sh apply
+uv run vpaexp --profile full --results results-window-a rq4 --limit-s 600
+uv run vpaexp --profile full --results results-window-a rq4 --rep 1
+```
+
+Every constrained run checks for exactly 6,656 MiB after other pods and samplers. Samplers request 128 MiB in total for every condition. Each VPA ceiling permits the entire workload budget. The full replay defaults to a default-VPA target and a present default-VPA neighbor. Use `--setting static` for the static target and `--neighbor absent` for isolated controls. Use the same budget and initial sizing in all four conditions. The 60-CPU runs are calibration evidence.
+
+Outputs are under `results-window-a/full/rq4/`, with separate run, client, watch, audit, sampler and summary files per function. The parent directory includes initial resource accounting and a node snapshot every minute. After the campaign, restore the original node configuration:
+
+```bash
+scripts/rq4-budget.sh restore
+```

@@ -101,6 +101,9 @@ class WatchRecorder:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _out: IO[str] | None = None
 
+    app: str = APP
+    pod_name: str | None = None
+
     WATCHES = {
         "pod": ["pods", "-l", f"app={APP}"],
         "vpa": ["verticalpodautoscalers.autoscaling.k8s.io"],
@@ -109,7 +112,14 @@ class WatchRecorder:
 
     def start(self) -> None:
         self._out = open(self.out_path, "a")
-        for kind, what in self.WATCHES.items():
+        watches = self.WATCHES
+        if self.pod_name:
+            watches = {
+                "pod": ["pods", "-l", f"app={self.app}"],
+                "vpa": ["verticalpodautoscalers.autoscaling.k8s.io", "--field-selector", f"metadata.name={self.app}"],
+                "event": ["events", "--field-selector", f"involvedObject.name={self.pod_name}"],
+            }
+        for kind, what in watches.items():
             t = threading.Thread(target=self._watch, args=(kind, what), daemon=True)
             t.start()
             self._threads.append(t)
@@ -121,11 +131,14 @@ class WatchRecorder:
             with self._lock:
                 self._procs.append(proc)
             assert proc.stdout is not None
-            for line in proc.stdout:  # kubectl writes one watch event per line
+            pending = ""
+            for line in proc.stdout:
                 try:
-                    event = json.loads(line)
+                    pending += line
+                    event = json.loads(pending)
                 except json.JSONDecodeError:
                     continue
+                pending = ""
                 self._write({"t": time.time(), "kind": kind, "type": event.get("type"), "object": event.get("object")})
             proc.wait()
             self._stop.wait(1.0)
